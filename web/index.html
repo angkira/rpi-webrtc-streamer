@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RPi Sensor Streamer</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        video { background-color: #333; width: 80vw; }
+        pre { background-color: #eee; padding: 1em; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>RPi WebRTC Video Stream</h1>
+    <video id="video" autoplay playsinline></video>
+    <h2>Logs</h2>
+    <pre id="logs"></pre>
+
+    <script>
+        const log = (message) => {
+            console.log(message);
+            document.getElementById('logs').textContent += message + '\n';
+        };
+
+        const peerConnection = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+        const videoElement = document.getElementById('video');
+
+        peerConnection.ontrack = (event) => {
+            log('Received remote track!');
+            if (event.streams && event.streams[0]) {
+                videoElement.srcObject = event.streams[0];
+            }
+        };
+
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                log('Sending ICE candidate...');
+                ws.send(JSON.stringify({ iceCandidate: event.candidate }));
+            }
+        };
+        
+        peerConnection.onconnectionstatechange = () => {
+            log(`Connection state changed: ${peerConnection.connectionState}`);
+        };
+
+        // Replace with the IP address of your Raspberry Pi
+        const RPI_IP = window.location.hostname || 'localhost';
+        const ws = new WebSocket(`ws://${RPI_IP}:5557`);
+
+        ws.onopen = async () => {
+            log('WebSocket connection opened.');
+            try {
+                log('Creating offer...');
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                log('Sending offer...');
+                ws.send(JSON.stringify({ offer: peerConnection.localDescription }));
+            } catch (e) {
+                log(`Error creating offer: ${e}`);
+            }
+        };
+
+        ws.onmessage = async (event) => {
+            const message = JSON.parse(event.data);
+            log(`Received message: ${Object.keys(message)[0]}`);
+
+            if (message.answer) {
+                try {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+                    log('Remote description set.');
+                } catch (e) {
+                    log(`Error setting remote description: ${e}`);
+                }
+            } else if (message.iceCandidate) {
+                try {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.iceCandidate));
+                    log('ICE candidate added.');
+                } catch (e) {
+                    log(`Error adding ICE candidate: ${e}`);
+                }
+            }
+        };
+
+        ws.onerror = (error) => {
+            log(`WebSocket error: ${error.message}`);
+        };
+
+        ws.onclose = () => {
+            log('WebSocket connection closed.');
+        };
+
+    </script>
+</body>
+</html> 

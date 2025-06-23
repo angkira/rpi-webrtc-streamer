@@ -1,0 +1,64 @@
+# Configuration for the RPi Sensor Streamer
+
+[app]
+data_producer_loop_ms = 100
+
+[app.topics]
+lidar_tof050c = "lidar/tof050c"
+imu_1 = "imu/1"
+imu_2 = "imu/2"
+
+[zeromq]
+data_publisher_address = "inproc://data_publisher"
+video_control_address = "tcp://*:5558"
+
+[webrtc]
+listen_address = "0.0.0.0:5557"
+stun_server = "stun:stun.l.google.com:19302"
+track_id = "video"
+stream_id = "rpi_sensor_streamer"
+
+[camera_1]
+# Common scene: 5MP -> Crop to 16:9 -> Downscale to 720p
+device = "/dev/video0"
+source_width = 2592
+source_height = 1944
+crop_x = 0
+crop_y = 234 # (1944 - (2592 * 9/16)) / 2
+crop_width = 2592
+crop_height = 1458 # 2592 * 9/16
+target_width = 1280
+target_height = 720
+fps = 30
+
+[camera_2]
+# Focused view: Crop to 720p, no downscale
+device = "/dev/video2"
+source_width = 1920 # Assuming source is 1080p for this camera
+source_height = 1080
+crop_x = 320 # (1920 - 1280) / 2
+crop_y = 180 # (1080 - 720) / 2
+crop_width = 1280
+crop_height = 720
+target_width = 1280
+target_height = 720
+fps = 30
+
+[lidar_tof050c]
+i2c_bus = 1
+enable_pin = 17 # GPIO17
+# Default I2C address is 0x29
+
+[lidar_tof400c]
+i2c_bus = 1
+enable_pin = 27 # GPIO27
+# Default I2C address is 0x29, will be changed at runtime
+new_i2c_address = 0x2A
+
+[imu_1]
+i2c_bus = 0
+address = 0x68 # Assumes default address
+
+[imu_2]
+i2c_bus = 0
+address = 0x69 # Assumes jumper is set for alternate address 
