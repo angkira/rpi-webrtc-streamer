@@ -59,6 +59,7 @@ ssh "$remote_host" "rm -rf $remote_dir"
 ssh "$remote_host" "mkdir -p $remote_dir"
 scp "$BINARY_PATH" "$remote_host:$remote_dir/$binary_name"
 scp "$APP_CONFIG" "$remote_host:$remote_dir/"
+scp -r "web" "$remote_host:$remote_dir/"
 scp "$SERVICE_FILE" "$remote_host:/tmp/$service_name.service"
 echo "✅ Files transferred."
 

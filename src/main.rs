@@ -9,12 +9,14 @@ mod gst_webrtc;
 mod camera;
 mod processing;
 mod webrtc;
+mod web_server;
 
 use crate::config::load_config;
 use crate::sensors::{
     icm20948::Imu,
     lidar::{Lidar, LidarType},
 };
+use crate::web_server::run_web_server;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -22,6 +24,14 @@ struct CliArgs {
     /// Base port for the first camera's WebRTC signaling server (cam1). Default 5557.
     #[arg(long, default_value_t = 5557)]
     base_port: u16,
+    
+    /// Port for the integrated web server. Default 8080.
+    #[arg(long, default_value_t = 8080)]
+    web_port: u16,
+    
+    /// IP address of this Pi for the web interface. Default auto-detect.
+    #[arg(long)]
+    pi_ip: Option<String>,
 }
 
 async fn data_producer_task(config: config::Config) -> Result<()> {
@@ -181,6 +191,21 @@ async fn data_producer_task(config: config::Config) -> Result<()> {
     task.await?
 }
 
+fn get_local_ip() -> String {
+    // Try to get the actual IP address, fallback to localhost
+    use std::net::{UdpSocket, SocketAddr};
+    
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if let Ok(()) = socket.connect("8.8.8.8:80") {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
+    }
+    
+    "localhost".to_string()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -189,12 +214,23 @@ async fn main() -> Result<()> {
     log::info!("Starting application with args: {:?}", args);
 
     let config_master = load_config()?;
+    
+    // Determine PI IP address
+    let pi_ip = args.pi_ip.unwrap_or_else(get_local_ip);
 
     // Spawn the data producer as an async task (unaffected by cameras)
     let producer_config = config_master.clone();
     let producer_handle = tokio::spawn(async move {
         if let Err(e) = data_producer_task(producer_config).await {
             log::error!("Data producer task failed: {}", e);
+        }
+    });
+
+    // Spawn the integrated web server
+    let web_pi_ip = pi_ip.clone();
+    let web_handle = tokio::spawn(async move {
+        if let Err(e) = run_web_server(args.web_port, web_pi_ip).await {
+            log::error!("Web server failed: {}", e);
         }
     });
 
