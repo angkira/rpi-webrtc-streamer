@@ -12,9 +12,9 @@ const GYRO_XOUT_H: u8 = 0x33;
 const ACCEL_SENSITIVITY: f32 = 16384.0;
 const GYRO_SENSITIVITY: f32 = 131.0;
 
+#[derive(Debug)]
 pub struct Imu {
     i2c: I2c,
-    pub id: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -24,20 +24,23 @@ pub struct ImuData {
 }
 
 impl Imu {
-    pub fn new(bus: u8, address: u8, id: &str) -> Result<Self> {
-        let mut i2c = I2c::with_bus(bus)?;
-        i2c.set_slave_address(address as u16);
+    pub fn new(i2c_bus: u8, address: u8, _id: &str) -> Result<Self> {
+        let mut i2c = I2c::with_bus(i2c_bus)?;
+        i2c.set_slave_address(address as u16)?;
 
         // Verify we are talking to the right device
-        let who_am_i = i2c.smbus_read_byte(WHO_AM_I)?;
+        let mut buf = [0u8; 1];
+        i2c.block_read(WHO_AM_I, &mut buf)?;
+        let who_am_i = buf[0];
+
         if who_am_i != WHO_AM_I_VAL {
             return Err(anyhow!("Invalid ICM20948 WhoAmI: {:#04x} at addr {:#04x}", who_am_i, address));
         }
 
         // Wake sensor up by clearing the sleep bit in PWR_MGMT_1
-        i2c.smbus_write_byte(PWR_MGMT_1, 0x01)?;
+        i2c.block_write(PWR_MGMT_1, &[0x01])?;
 
-        Ok(Imu { i2c, id: id.to_string() })
+        Ok(Imu { i2c })
     }
     
     // Helper to read two bytes and combine them into a signed 16-bit integer

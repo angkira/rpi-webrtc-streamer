@@ -4,13 +4,19 @@
     <title>RPi Sensor Streamer</title>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
-        video { background-color: #333; width: 80vw; }
-        pre { background-color: #eee; padding: 1em; border-radius: 5px; }
+        .video-container { display: flex; justify-content: center; gap: 10px; width: 90vw; }
+        video { background-color: #333; width: 100%; }
+        pre { background-color: #eee; padding: 1em; border-radius: 5px; width: 80vw; white-space: pre-wrap; word-break: break-all; }
     </style>
 </head>
 <body>
-    <h1>RPi WebRTC Video Stream</h1>
-    <video id="video" autoplay playsinline></video>
+    <h1>RPi WebRTC Stream</h1>
+    <div class="video-container">
+        <video id="video1" autoplay playsinline muted></video>
+        <video id="video2" autoplay playsinline muted></video>
+    </div>
+    <h2>Sensor Data</h2>
+    <pre id="sensor-data">Waiting for data...</pre>
     <h2>Logs</h2>
     <pre id="logs"></pre>
 
@@ -20,75 +26,118 @@
             document.getElementById('logs').textContent += message + '\n';
         };
 
-        const peerConnection = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-        const videoElement = document.getElementById('video');
-
-        peerConnection.ontrack = (event) => {
-            log('Received remote track!');
-            if (event.streams && event.streams[0]) {
-                videoElement.srcObject = event.streams[0];
-            }
-        };
-
-        peerConnection.onicecandidate = (event) => {
-            if (event.candidate) {
-                log('Sending ICE candidate...');
-                ws.send(JSON.stringify({ iceCandidate: event.candidate }));
-            }
-        };
-        
-        peerConnection.onconnectionstatechange = () => {
-            log(`Connection state changed: ${peerConnection.connectionState}`);
-        };
+        const video1 = document.getElementById('video1');
+        const video2 = document.getElementById('video2');
+        const sensorDataElement = document.getElementById('sensor-data');
 
         // Replace with the IP address of your Raspberry Pi
-        const RPI_IP = window.location.hostname || 'localhost';
-        const ws = new WebSocket(`ws://${RPI_IP}:5557`);
+        const RPI_IP = "192.168.5.75" || 'localhost';
 
-        ws.onopen = async () => {
-            log('WebSocket connection opened.');
-            try {
-                log('Creating offer...');
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-                log('Sending offer...');
-                ws.send(JSON.stringify({ offer: peerConnection.localDescription }));
-            } catch (e) {
-                log(`Error creating offer: ${e}`);
-            }
-        };
+        // Helper to bootstrap a WebRTC session to a given port & element
+        const startStream = (port, videoElem, receiveSensorData = false) => {
+            const pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
 
-        ws.onmessage = async (event) => {
-            const message = JSON.parse(event.data);
-            log(`Received message: ${Object.keys(message)[0]}`);
+            const ws = new WebSocket(`ws://${RPI_IP}:${port}`);
+            
+            // Queue for ICE candidates received before remote description is set
+            let iceCandidateQueue = [];
+            let remoteDescriptionSet = false;
 
-            if (message.answer) {
-                try {
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
-                    log('Remote description set.');
-                } catch (e) {
-                    log(`Error setting remote description: ${e}`);
+            pc.ontrack = (event) => {
+                log(`Port ${port}: Received track – kind ${event.track.kind}`);
+                if (event.track.kind === 'video') {
+                    videoElem.srcObject = new MediaStream([event.track]);
+                    log(`Port ${port}: Video stream attached to element`);
                 }
-            } else if (message.iceCandidate) {
-                try {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.iceCandidate));
-                    log('ICE candidate added.');
-                } catch (e) {
-                    log(`Error adding ICE candidate: ${e}`);
-                }
+            };
+
+            if (receiveSensorData) {
+                pc.ondatachannel = (event) => {
+                    log(`Port ${port}: data channel opened`);
+                    const ch = event.channel;
+                    ch.onmessage = (e) => (sensorDataElement.textContent = e.data);
+                };
             }
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    log(`Port ${port}: Sending local ICE candidate`);
+                    ws.send(JSON.stringify({ iceCandidate: event.candidate }));
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                log(`Port ${port}: Connection state: ${pc.connectionState}`);
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                log(`Port ${port}: ICE connection state: ${pc.iceConnectionState}`);
+            };
+
+            ws.onopen = async () => {
+                try {
+                    // Prefer VP8 to match the server's VP8 encoder
+                    const receiveCodecs = RTCRtpReceiver.getCapabilities('video').codecs;
+                    const vp8Codecs = receiveCodecs.filter(c => c.mimeType.toLowerCase() === 'video/vp8');
+                    const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+                    if (vp8Codecs.length && transceiver.setCodecPreferences) {
+                        transceiver.setCodecPreferences(vp8Codecs);
+                        log(`Port ${port}: set VP8 codec preference`);
+                    }
+
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    log(`Port ${port}: Sending offer`);
+                    ws.send(JSON.stringify({ offer: pc.localDescription }));
+                } catch (e) {
+                    log(`Port ${port}: offer error ${e}`);
+                }
+            };
+
+            ws.onmessage = async (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.answer) {
+                        log(`Port ${port}: Received answer, setting remote description`);
+                        await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+                        remoteDescriptionSet = true;
+                        
+                        // Process queued ICE candidates
+                        for (const candidate of iceCandidateQueue) {
+                            log(`Port ${port}: Adding queued ICE candidate`);
+                            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                        }
+                        iceCandidateQueue = [];
+                        
+                    } else if (msg.iceCandidate) {
+                        if (remoteDescriptionSet) {
+                            log(`Port ${port}: Adding ICE candidate immediately`);
+                            await pc.addIceCandidate(new RTCIceCandidate(msg.iceCandidate));
+                        } else {
+                            log(`Port ${port}: Queueing ICE candidate (remote description not set yet)`);
+                            iceCandidateQueue.push(msg.iceCandidate);
+                        }
+                    }
+                } catch (e) {
+                    log(`Port ${port}: WebRTC error: ${e}`);
+                }
+            };
+
+            ws.onerror = (error) => {
+                log(`Port ${port}: WebSocket error: ${error}`);
+            };
+
+            ws.onclose = () => {
+                log(`Port ${port}: WebSocket closed`);
+            };
         };
 
-        ws.onerror = (error) => {
-            log(`WebSocket error: ${error.message}`);
-        };
-
-        ws.onclose = () => {
-            log('WebSocket connection closed.');
-        };
-
+        // Wide camera on 5557 + sensor data
+        startStream(5557, video1, true);
+        // Focus camera on 5558
+        startStream(5558, video2, false);
     </script>
 </body>
 </html> 

@@ -36,7 +36,7 @@ impl Lidar {
 
     pub fn new(bus: u8, address: u8, sensor_type: LidarType) -> Result<Self> {
         let mut i2c = I2c::with_bus(bus)?;
-        i2c.set_slave_address(address as u16);
+        i2c.set_slave_address(address as u16)?;
 
         let mut lidar = Lidar { i2c, sensor_type };
 
@@ -68,7 +68,7 @@ impl Lidar {
         // It requires writing the new address (new_addr << 1) to a specific register.
         // self.i2c.smbus_write_byte(VL53L1X_REG_I2C_SLAVE_DEVICE_ADDRESS, new_addr)?;
         log::info!("(Simulated) VL53L1X address changed to {:#04x}", new_addr);
-        self.i2c.set_slave_address(new_addr as u16);
+        self.i2c.set_slave_address(new_addr as u16)?;
         Ok(())
     }
 

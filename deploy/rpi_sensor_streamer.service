@@ -1,0 +1,19 @@
+[Unit]
+Description=RPI Sensor Streamer Service
+After=network.target
+
+[Service]
+User=angkira
+Group=angkira
+Environment="RUST_LOG=debug"
+Environment="GST_DEBUG=webrtcbin:6,*:3"
+ExecStartPre=/bin/bash -c 'mkdir -p /home/angkira/log/rpi_sensor_streamer; LOG=/home/angkira/log/rpi_sensor_streamer/streamer.log; if [ -f "$LOG" ]; then mv "$LOG" "$LOG.$(date +%%Y%%m%%d_%%H%%M%%S)"; fi'
+ExecStart=/usr/bin/env bash -c 'cd /home/angkira/opt/rpi_sensor_streamer && RUST_LOG=info GST_DEBUG="webrtcbin:6,*:2" ./rpi_sensor_streamer --base-port 5557 >> /home/angkira/log/rpi_sensor_streamer/streamer.log 2>&1'
+WorkingDirectory=/home/angkira/opt/rpi_sensor_streamer
+Restart=always
+Environment=RUST_LOG=info
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target 

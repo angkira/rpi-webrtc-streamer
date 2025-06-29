@@ -1,0 +1,10 @@
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:main"
+dockerfile = "Dockerfile.cross"
+
+[target.aarch64-unknown-linux-gnu]
+# Prebuilt image with GStreamer/GLib dev packages installed.
+image = "rpi-sensor-streamer-cross:gs1"
+
+[build.env]
+passthrough = ["LIBCLANG_PATH"]

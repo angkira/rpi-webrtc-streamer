@@ -1,0 +1,7 @@
+# Deployment configuration
+binary_name=rpi_sensor_streamer
+remote_host=clamp
+remote_base_dir=/home/angkira/opt
+target_arch=aarch64-unknown-linux-gnu
+service_name=rpi_sensor_streamer
+run_after_deploy=true                         # Run binary after deployment
