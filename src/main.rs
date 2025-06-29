@@ -8,6 +8,7 @@ mod sensors;
 mod gst_webrtc;
 mod camera;
 mod processing;
+mod webrtc;
 
 use crate::config::load_config;
 use crate::sensors::{

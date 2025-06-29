@@ -1,0 +1,303 @@
+use anyhow::Result;
+use std::sync::{mpsc, Arc};
+use futures_util::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio::sync::Mutex;
+
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_webrtc as gst_webrtc;
+use gstreamer_sdp as gst_sdp;
+
+use crate::config::Config;
+use super::codec::{extract_vp8_payload_type, extract_h264_payload_type, create_rtp_payloader, create_rtp_caps};
+
+pub struct WebRTCClient {
+    pub webrtcbin: gst::Element,
+    pub queue: gst::Element,
+    pub tee_src_pad: gst::Pad,
+}
+
+impl WebRTCClient {
+    pub fn new(
+        pipeline: &gst::Pipeline,
+        tee: &gst::Element,
+        config: &Config,
+    ) -> Result<Self> {
+        let webrtcbin = gst::ElementFactory::make("webrtcbin").build()?;
+        let queue = gst::ElementFactory::make("queue").build()?;
+
+        // Configure WebRTC
+        let stun_uri = normalize_stun_server(&config.webrtc.stun_server);
+        webrtcbin.set_property("stun-server", &stun_uri);
+        webrtcbin.set_property_from_str("bundle-policy", "max-bundle");
+        
+        // Configure queue
+        queue.set_property("max-size-buffers", &config.webrtc.queue_buffers);
+        queue.set_property_from_str("leaky", "downstream");
+
+        // Add to pipeline
+        pipeline.add_many(&[&queue, &webrtcbin])?;
+
+        // Link queue to tee
+        let tee_src_pad = tee.request_pad_simple("src_%u")
+            .ok_or_else(|| anyhow::anyhow!("Failed to request tee pad"))?;
+        let queue_sink_pad = queue.static_pad("sink")
+            .ok_or_else(|| anyhow::anyhow!("Failed to get queue sink pad"))?;
+        tee_src_pad.link(&queue_sink_pad)?;
+
+        // Sync states
+        queue.sync_state_with_parent()?;
+        webrtcbin.sync_state_with_parent()?;
+
+        log::debug!("WebRTC client elements created and linked");
+
+        Ok(WebRTCClient {
+            webrtcbin,
+            queue,
+            tee_src_pad,
+        })
+    }
+
+    pub async fn handle_connection(
+        self,
+        stream: TcpStream,
+        config: Arc<Config>,
+    ) -> Result<()> {
+        log::debug!("New WebRTC client handler started");
+        
+        let ws_stream = accept_async(stream).await?;
+        let (ws_tx, mut ws_rx) = ws_stream.split();
+        let ws_tx_arc = Arc::new(tokio::sync::Mutex::new(ws_tx));
+
+        // Set up ICE candidate handling
+        let (ice_tx, mut ice_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, String)>();
+        
+        self.webrtcbin.connect("on-ice-candidate", false, move |values| {
+            let mline = values[1].get::<u32>().unwrap();
+            let cand = values[2].get::<String>().unwrap();
+            let _ = ice_tx.send((mline, cand));
+            None::<gst::glib::Value>
+        });
+
+        // Handle ICE candidates in separate task
+        let ice_ws_sender = ws_tx_arc.clone();
+        tokio::spawn(async move {
+            while let Some((mline, cand)) = ice_rx.recv().await {
+                let msg = serde_json::json!({ 
+                    "iceCandidate": { 
+                        "candidate": cand, 
+                        "sdpMLineIndex": mline 
+                    } 
+                });
+                if let Err(e) = ice_ws_sender.lock().await.send(Message::Text(msg.to_string().into())).await {
+                    log::error!("Failed to send ICE candidate: {}", e);
+                    break;
+                }
+            }
+        });
+
+        // Handle WebSocket messages
+        while let Some(msg) = ws_rx.next().await {
+            let msg = msg?;
+            if let Message::Text(txt) = msg {
+                log::debug!("Received WebRTC message: {}", txt);
+                
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&txt) {
+                    if let Some(offer) = value.get("offer") {
+                        self.handle_offer(offer, &config, &ws_tx_arc).await?;
+                    } else if let Some(ice) = value.get("iceCandidate") {
+                        self.handle_ice_candidate(ice)?;
+                    }
+                }
+            }
+        }
+
+        log::info!("WebRTC client disconnected. Cleaning up.");
+        self.cleanup().await?;
+        Ok(())
+    }
+
+    async fn handle_offer(
+        &self,
+        offer: &serde_json::Value,
+        config: &Config,
+        ws_tx: &Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>>>,
+    ) -> Result<()> {
+        let sdp = offer.get("sdp").and_then(serde_json::Value::as_str).unwrap_or("");
+        log::debug!("Processing SDP offer for WebRTC client");
+        
+        // Extract payload type based on codec
+        let payload_type = match config.video.codec.as_str() {
+            "vp8" => extract_vp8_payload_type(sdp).unwrap_or(96),
+            "h264" => extract_h264_payload_type(sdp).unwrap_or(96),
+            codec => {
+                log::error!("Unsupported codec: {}", codec);
+                return Err(anyhow::anyhow!("Unsupported codec: {}", codec));
+            }
+        };
+        
+        log::debug!("Using {} payload type {} from browser offer", config.video.codec, payload_type);
+        
+        // Create payloader and caps filter
+        let pay = create_rtp_payloader(&config.video.codec, payload_type, &config.webrtc)?;
+        let pay_capsfilter = gst::ElementFactory::make("capsfilter").build()?;
+        let pay_caps = create_rtp_caps(&config.video.codec, payload_type)?;
+        pay_capsfilter.set_property("caps", &pay_caps);
+        
+        // Add to pipeline and link
+        if let Some(pipeline) = self.webrtcbin.parent().and_then(|p| p.downcast::<gst::Pipeline>().ok()) {
+            pipeline.add_many(&[&pay, &pay_capsfilter])?;
+            gst::Element::link_many(&[&self.queue, &pay, &pay_capsfilter])?;
+            
+            // Link to webrtcbin
+            let sink_pad = self.webrtcbin.request_pad_simple("sink_%u")
+                .ok_or_else(|| anyhow::anyhow!("Failed to request sink pad from webrtcbin"))?;
+            let src_pad = pay_capsfilter.static_pad("src")
+                .ok_or_else(|| anyhow::anyhow!("Failed to get src pad from capsfilter"))?;
+            src_pad.link(&sink_pad)?;
+            
+            // Sync states
+            pay.sync_state_with_parent()?;
+            pay_capsfilter.sync_state_with_parent()?;
+            
+            // Start pipeline if needed
+            if pipeline.current_state() != gst::State::Playing {
+                log::info!("Setting pipeline to Playing state");
+                pipeline.set_state(gst::State::Playing)?;
+            }
+        }
+        
+        // Process SDP offer
+        let sdp_msg = gst_sdp::SDPMessage::parse_buffer(sdp.as_bytes())?;
+        let desc = gst_webrtc::WebRTCSessionDescription::new(gst_webrtc::WebRTCSDPType::Offer, sdp_msg);
+        
+        // Set remote description and create answer
+        self.set_remote_description_and_create_answer(desc, ws_tx).await?;
+        
+        Ok(())
+    }
+
+    fn handle_ice_candidate(&self, ice: &serde_json::Value) -> Result<()> {
+        let cand = ice.get("candidate").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        let mline = ice.get("sdpMLineIndex").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+        
+        log::debug!("Received ICE candidate: mline={}, cand={}", mline, cand);
+        self.webrtcbin.emit_by_name::<()>("add-ice-candidate", &[&mline, &cand]);
+        
+        Ok(())
+    }
+
+    async fn set_remote_description_and_create_answer(
+        &self,
+        desc: gst_webrtc::WebRTCSessionDescription,
+        ws_tx: &Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>>>,
+    ) -> Result<()> {
+        // Set remote description
+        let (remote_tx, remote_rx) = mpsc::channel();
+        let remote_promise = gst::Promise::with_change_func(move |reply| {
+            let _ = remote_tx.send(reply.and_then(|_| Ok(())));
+        });
+        
+        self.webrtcbin.emit_by_name::<()>("set-remote-description", &[&desc, &remote_promise]);
+        
+        match remote_rx.recv() {
+            Ok(Ok(())) => {
+                log::debug!("Remote description set successfully");
+                
+                // Create answer
+                let (answer_tx, answer_rx) = mpsc::channel();
+                let answer_promise = gst::Promise::with_change_func(move |reply| {
+                    match reply {
+                        Ok(Some(reply_struct)) => {
+                            let _ = answer_tx.send(Ok(Some(reply_struct.to_owned())));
+                        }
+                        Ok(None) => {
+                            let _ = answer_tx.send(Ok(None));
+                        }
+                        Err(e) => {
+                            let _ = answer_tx.send(Err(e));
+                        }
+                    }
+                });
+                
+                self.webrtcbin.emit_by_name::<()>("create-answer", &[&None::<gst::Structure>, &answer_promise]);
+                
+                match answer_rx.recv() {
+                    Ok(Ok(Some(reply))) => {
+                        if let Ok(answer_value) = reply.value("answer") {
+                            if let Ok(answer_desc) = answer_value.get::<gst_webrtc::WebRTCSessionDescription>() {
+                                self.set_local_description_and_send_answer(answer_desc, ws_tx).await?;
+                            }
+                        }
+                    }
+                    _ => {
+                        log::error!("Failed to create answer");
+                    }
+                }
+            }
+            _ => {
+                log::error!("Failed to set remote description");
+            }
+        }
+        
+        Ok(())
+    }
+
+    async fn set_local_description_and_send_answer(
+        &self,
+        answer_desc: gst_webrtc::WebRTCSessionDescription,
+        ws_tx: &Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>>>,
+    ) -> Result<()> {
+        // Set local description
+        let (local_tx, local_rx) = mpsc::channel();
+        let local_promise = gst::Promise::with_change_func(move |reply| {
+            let _ = local_tx.send(reply.and_then(|_| Ok(())));
+        });
+        
+        self.webrtcbin.emit_by_name::<()>("set-local-description", &[&answer_desc, &local_promise]);
+        
+        match local_rx.recv() {
+            Ok(Ok(())) => {
+                let sdp = answer_desc.sdp().as_text()?;
+                let msg = serde_json::json!({ 
+                    "answer": { 
+                        "type": "answer", 
+                        "sdp": sdp 
+                    } 
+                });
+                
+                log::debug!("Sending SDP answer to client");
+                ws_tx.lock().await.send(Message::Text(msg.to_string().into())).await?;
+            }
+            _ => {
+                log::error!("Failed to set local description");
+            }
+        }
+        
+        Ok(())
+    }
+
+    async fn cleanup(&self) -> Result<()> {
+        log::debug!("Cleaning up WebRTC client elements");
+        
+        let _ = self.webrtcbin.set_state(gst::State::Null);
+        let _ = self.queue.set_state(gst::State::Null);
+        
+        // Note: Actual removal from pipeline should be handled by the caller
+        // since we need access to the pipeline and tee elements
+        
+        Ok(())
+    }
+}
+
+fn normalize_stun_server(stun_server: &str) -> String {
+    if stun_server.starts_with("stun://") {
+        stun_server.to_string()
+    } else if let Some(host_port) = stun_server.strip_prefix("stun:") {
+        format!("stun://{}", host_port)
+    } else {
+        format!("stun://{}", stun_server)
+    }
+} 

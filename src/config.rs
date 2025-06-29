@@ -51,14 +51,26 @@ fn default_camera_device() -> String {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct WebRtcConfig {
-    pub listen_address: String,
     pub stun_server: String,
-    pub track_id: String,
-    pub stream_id: String,
     #[serde(default = "default_bitrate")]
     pub bitrate: u32,
     #[serde(default = "default_queue_buffers")]
     pub queue_buffers: u32,
+    #[serde(default = "default_mtu")]
+    pub mtu: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct VideoConfig {
+    #[serde(default = "default_codec")]
+    pub codec: String,
+    #[serde(default = "default_encoder_preset")]
+    pub encoder_preset: String,
+    #[serde(default = "default_keyframe_interval")]
+    pub keyframe_interval: u32,
+    #[serde(default = "default_cpu_used")]
+    pub cpu_used: i32,
 }
 
 fn default_bitrate() -> u32 {
@@ -66,7 +78,27 @@ fn default_bitrate() -> u32 {
 }
 
 fn default_queue_buffers() -> u32 {
-    60
+    10
+}
+
+fn default_mtu() -> u32 {
+    1400
+}
+
+fn default_codec() -> String {
+    "vp8".to_string()
+}
+
+fn default_encoder_preset() -> String {
+    "realtime".to_string()
+}
+
+fn default_keyframe_interval() -> u32 {
+    30
+}
+
+fn default_cpu_used() -> i32 {
+    8 // Fastest encoding for VP8
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -101,6 +133,7 @@ pub struct Config {
     pub camera_2: CameraConfig,
     pub zeromq: ZeromqConfig,
     pub webrtc: WebRtcConfig,
+    pub video: VideoConfig,
 }
 
 pub fn load_config() -> Result<Config> {
