@@ -112,7 +112,11 @@ fn setup_pipeline(cfg: Config, cam_cfg: CameraConfig) -> Result<AppState> {
 
     let videoconvert = gst::ElementFactory::make("videoconvert").build()?;
     
-    log::info!("Camera pipeline: using auto-negotiated resolution with VP8 encoder");
+    // Add video flip to handle upside-down mounted cameras
+    let videoflip = gst::ElementFactory::make("videoflip").build()?;
+    videoflip.set_property_from_str("method", "rotate-180"); // Flip upside down (horizontal mirror)
+    
+    log::info!("Camera pipeline: using auto-negotiated resolution with VP8 encoder and 180° rotation");
 
     // --- VP8 Encoder Setup - More forgiving than H.264 for resolution ---
     let encoder = gst::ElementFactory::make("vp8enc").build()?;
@@ -127,6 +131,7 @@ fn setup_pipeline(cfg: Config, cam_cfg: CameraConfig) -> Result<AppState> {
     pipeline.add_many(&[
         &camsrc,
         &videoconvert,
+        &videoflip,
         &encoder,
         &tee,
     ])?;
@@ -134,6 +139,7 @@ fn setup_pipeline(cfg: Config, cam_cfg: CameraConfig) -> Result<AppState> {
     gst::Element::link_many(&[
         &camsrc,
         &videoconvert,
+        &videoflip,
         &encoder,
         &tee,
     ])?;
