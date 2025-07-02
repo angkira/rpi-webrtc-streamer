@@ -55,9 +55,13 @@ pub fn create_rtp_payloader(codec: &str, payload_type: u32, webrtc_cfg: &WebRtcC
 fn create_vp8_payloader(payload_type: u32, webrtc_cfg: &WebRtcConfig) -> Result<gst::Element> {
     let pay = gst::ElementFactory::make("rtpvp8pay").build()?;
     
-    // Configure VP8 payloader
-    pay.set_property("mtu", &webrtc_cfg.mtu);
+    // Configure VP8 payloader with MEMORY LEAK PROTECTION
+    pay.set_property("mtu", &(webrtc_cfg.mtu as u32));
     pay.set_property("pt", &payload_type);
+    
+    // Add buffer management to prevent memory leaks
+    pay.set_property("max-ptime", &100i64); // Max 100ms per packet to prevent large buffers
+    pay.set_property("min-ptime", &20i64);  // Min 20ms per packet for efficiency
     
     log::debug!("VP8 payloader configured: payload_type={}, mtu={}", payload_type, webrtc_cfg.mtu);
     Ok(pay)
@@ -66,13 +70,21 @@ fn create_vp8_payloader(payload_type: u32, webrtc_cfg: &WebRtcConfig) -> Result<
 fn create_h264_payloader(payload_type: u32, webrtc_cfg: &WebRtcConfig) -> Result<gst::Element> {
     let pay = gst::ElementFactory::make("rtph264pay").build()?;
     
-    // Configure H.264 payloader
-    pay.set_property_from_str("config-interval", "1");
-    pay.set_property("mtu", &webrtc_cfg.mtu);
-    pay.set_property_from_str("aggregate-mode", "zero-latency");
+    // Configure H.264 payloader for WebRTC compatibility with robust SPS/PPS handling
+    pay.set_property("config-interval", &-1i32); // Only send SPS/PPS when stream changes (more reliable)
+    pay.set_property_from_str("aggregate-mode", "zero-latency"); // zero-latency mode for WebRTC
+    pay.set_property("mtu", &(webrtc_cfg.mtu as u32));
     pay.set_property("pt", &payload_type);
     
-    log::debug!("H.264 payloader configured: payload_type={}, mtu={}", payload_type, webrtc_cfg.mtu);
+    // Additional properties for better H.264 compatibility
+    pay.set_property("sprop-vps-pps-id-present", &false); // Disable VPS for baseline profile
+    
+    // MEMORY LEAK PROTECTION: Add buffer management
+    pay.set_property("max-ptime", &100i64); // Max 100ms per packet to prevent large buffers
+    pay.set_property("min-ptime", &20i64);  // Min 20ms per packet for efficiency
+    
+    log::debug!("H.264 payloader configured: payload_type={}, mtu={}, config-interval=-1 (on-change), aggregate-mode=zero-latency", 
+                payload_type, webrtc_cfg.mtu);
     Ok(pay)
 }
 
@@ -92,6 +104,8 @@ pub fn create_rtp_caps(codec: &str, payload_type: u32) -> Result<gst::Caps> {
                 .field("encoding-name", "H264")
                 .field("payload", payload_type as i32)
                 .field("clock-rate", 90000i32)
+                .field("packetization-mode", "1")
+                .field("profile-level-id", "42e01f") // Constrained Baseline Profile, Level 3.1
                 .build()
         }
         codec => {

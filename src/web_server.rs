@@ -2,17 +2,18 @@ use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::fs;
-use std::net::SocketAddr;
+use crate::config::Config;
 
-pub async fn run_web_server(port: u16, pi_ip: String) -> Result<()> {
+pub async fn run_web_server(port: u16, pi_ip: String, config: Config) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
     log::info!("Web server listening on http://{}:{}", pi_ip, port);
 
     while let Ok((stream, _)) = listener.accept().await {
         let pi_ip_clone = pi_ip.clone();
+        let config_clone = config.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_web_request(stream, pi_ip_clone).await {
+            if let Err(e) = handle_web_request(stream, pi_ip_clone, config_clone).await {
                 log::error!("Web server error: {}", e);
             }
         });
@@ -20,23 +21,46 @@ pub async fn run_web_server(port: u16, pi_ip: String) -> Result<()> {
     Ok(())
 }
 
-async fn handle_web_request(mut stream: TcpStream, pi_ip: String) -> Result<()> {
+async fn handle_web_request(mut stream: TcpStream, pi_ip: String, config: Config) -> Result<()> {
     let mut buffer = [0; 1024];
-    let n = stream.read(&mut buffer).await?;
-    let request = String::from_utf8_lossy(&buffer[..n]);
+    let bytes_read = stream.read(&mut buffer).await?;
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
     
-    let response = if request.starts_with("GET / ") || request.starts_with("GET /index.html") {
-        create_html_response(&pi_ip).await
-    } else if request.starts_with("GET /favicon.ico") {
-        create_favicon_response()
+    // Extract the first line for logging
+    let first_line = request.lines().next().unwrap_or("invalid request");
+    log::info!("Web server request: {}", first_line);
+    
+    if request.starts_with("GET /api/config") {
+        log::info!("Serving config API");
+        let response = create_config_response(&config).await;
+        stream.write_all(response.as_bytes()).await?;
     } else {
-        create_404_response()
-    };
-    
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
+        log::info!("Serving HTML page with PI IP: {}", pi_ip);
+        let response = create_html_response(&pi_ip).await;
+        stream.write_all(response.as_bytes()).await?;
+    }
     
     Ok(())
+}
+
+async fn create_config_response(config: &Config) -> String {
+    let config_json = format!(
+        r#"{{"codec": "{}", "bitrate": {}, "keyframe_interval": {}}}"#,
+        config.video.codec,
+        config.webrtc.bitrate,
+        config.video.keyframe_interval
+    );
+    
+    format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/json\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {}",
+        config_json.len(),
+        config_json
+    )
 }
 
 async fn create_html_response(pi_ip: &str) -> String {
@@ -56,8 +80,10 @@ async fn create_html_response(pi_ip: &str) -> String {
 }
 
 async fn load_html_template(pi_ip: &str) -> Result<String> {
+    log::info!("Loading HTML template from web/viewer.html");
     let html_content = fs::read_to_string("web/viewer.html").await?;
     let html_with_ip = html_content.replace("PI_IP_PLACEHOLDER", pi_ip);
+    log::info!("HTML template loaded successfully, replaced IP with: {}", pi_ip);
     Ok(html_with_ip)
 }
 

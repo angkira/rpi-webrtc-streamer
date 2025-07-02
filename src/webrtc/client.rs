@@ -1,22 +1,30 @@
 use anyhow::Result;
-use std::sync::{mpsc, Arc};
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tokio::sync::Mutex;
-
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_webrtc as gst_webrtc;
-use gstreamer_sdp as gst_sdp;
+use log::{debug, info, warn};
+use std::sync::{mpsc, Arc};
+
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 use crate::config::Config;
-use super::codec::{extract_vp8_payload_type, extract_h264_payload_type, create_rtp_payloader, create_rtp_caps};
+use crate::webrtc::codec::{create_rtp_payloader, create_rtp_caps, extract_vp8_payload_type, extract_h264_payload_type};
+
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+use gstreamer_webrtc as gst_webrtc;
+use gstreamer_sdp as gst_sdp;
 
 pub struct WebRTCClient {
     pub webrtcbin: gst::Element,
     pub queue: gst::Element,
     pub tee_src_pad: gst::Pad,
+    // Store payloader elements for cleanup
+    pub payloader_elements: Arc<Mutex<Vec<gst::Element>>>,
+    // Store webrtc sink pad for cleanup
+    pub webrtc_sink_pad: Arc<Mutex<Option<gst::Pad>>>,
+    // Store pipeline reference for cleanup
+    pub pipeline: gst::Pipeline,
 }
 
 impl WebRTCClient {
@@ -25,19 +33,34 @@ impl WebRTCClient {
         tee: &gst::Element,
         config: &Config,
     ) -> Result<Self> {
-        let webrtcbin = gst::ElementFactory::make("webrtcbin").build()?;
-        let queue = gst::ElementFactory::make("queue").build()?;
+        // Generate unique client ID for element names to avoid conflicts
+        let client_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        
+        let webrtcbin = gst::ElementFactory::make("webrtcbin")
+            .name(&format!("webrtcbin_{}", client_id))
+            .build()?;
+        let queue = gst::ElementFactory::make("queue")
+            .name(&format!("client_queue_{}", client_id))
+            .build()?;
 
         // Configure WebRTC
         let stun_uri = normalize_stun_server(&config.webrtc.stun_server);
         webrtcbin.set_property("stun-server", &stun_uri);
         webrtcbin.set_property_from_str("bundle-policy", "max-bundle");
         
-        // Configure queue
-        queue.set_property("max-size-buffers", &config.webrtc.queue_buffers);
-        queue.set_property_from_str("leaky", "downstream");
+        // Configure WebRTC bin with proper latency settings to fix RTP session warnings
+        webrtcbin.set_property("latency", &200u32); // 200ms default latency
+        
+        // Configure queue with leaky behavior to prevent memory accumulation  
+        queue.set_property("max-size-buffers", &10u32);
+        queue.set_property("max-size-time", &(2 * gst::ClockTime::SECOND));
+        queue.set_property("max-size-bytes", &(1024 * 1024 * 2u32)); // 2MB limit
+        queue.set_property_from_str("leaky", "downstream"); // Leak old buffers when full
 
-        // Add to pipeline
+        // Add elements to pipeline
         pipeline.add_many(&[&queue, &webrtcbin])?;
 
         // Link queue to tee
@@ -57,19 +80,22 @@ impl WebRTCClient {
             webrtcbin,
             queue,
             tee_src_pad,
+            payloader_elements: Arc::new(Mutex::new(Vec::new())),
+            webrtc_sink_pad: Arc::new(Mutex::new(None)),
+            pipeline: pipeline.clone(),
         })
     }
 
     pub async fn handle_connection(
-        self,
+        mut self,
         stream: TcpStream,
         config: Arc<Config>,
     ) -> Result<()> {
-        log::debug!("New WebRTC client handler started");
+        debug!("Handling WebRTC connection");
         
         let ws_stream = accept_async(stream).await?;
-        let (ws_tx, mut ws_rx) = ws_stream.split();
-        let ws_tx_arc = Arc::new(tokio::sync::Mutex::new(ws_tx));
+        let (ws_sender, mut ws_receiver) = ws_stream.split();
+        let ws_sender_arc = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
         // Set up ICE candidate handling
         let (ice_tx, mut ice_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, String)>();
@@ -82,8 +108,8 @@ impl WebRTCClient {
         });
 
         // Handle ICE candidates in separate task
-        let ice_ws_sender = ws_tx_arc.clone();
-        tokio::spawn(async move {
+        let ice_ws_sender = ws_sender_arc.clone();
+        let ice_task_handle = tokio::spawn(async move {
             while let Some((mline, cand)) = ice_rx.recv().await {
                 let msg = serde_json::json!({ 
                     "iceCandidate": { 
@@ -92,21 +118,21 @@ impl WebRTCClient {
                     } 
                 });
                 if let Err(e) = ice_ws_sender.lock().await.send(Message::Text(msg.to_string().into())).await {
-                    log::error!("Failed to send ICE candidate: {}", e);
+                    warn!("Failed to send ICE candidate: {}", e);
                     break;
                 }
             }
         });
 
-        // Handle WebSocket messages
-        while let Some(msg) = ws_rx.next().await {
+        // Wait for offers and send back answers
+        while let Some(msg) = ws_receiver.next().await {
             let msg = msg?;
             if let Message::Text(txt) = msg {
-                log::debug!("Received WebRTC message: {}", txt);
-                
+                debug!("Received WebRTC message: {}", txt);
+
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&txt) {
                     if let Some(offer) = value.get("offer") {
-                        self.handle_offer(offer, &config, &ws_tx_arc).await?;
+                        self.handle_offer(offer, &config, &ws_sender_arc).await?;
                     } else if let Some(ice) = value.get("iceCandidate") {
                         self.handle_ice_candidate(ice)?;
                     }
@@ -114,8 +140,12 @@ impl WebRTCClient {
             }
         }
 
+        // Cancel the ICE task when connection closes
+        ice_task_handle.abort();
+
         log::info!("WebRTC client disconnected. Cleaning up.");
-        self.cleanup().await?;
+        self.cleanup();
+        debug!("WebRTC client disconnected");
         Ok(())
     }
 
@@ -140,34 +170,52 @@ impl WebRTCClient {
         
         log::debug!("Using {} payload type {} from browser offer", config.video.codec, payload_type);
         
-        // Create payloader and caps filter
+        // Create elements required for RTP branch. No need for additional h264parse 
+        // since it's already in the main pipeline after the encoder.
+        // Generate unique names for payloader elements
+        let client_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        
         let pay = create_rtp_payloader(&config.video.codec, payload_type, &config.webrtc)?;
-        let pay_capsfilter = gst::ElementFactory::make("capsfilter").build()?;
+        
+        let pay_capsfilter = gst::ElementFactory::make("capsfilter")
+            .name(&format!("pay_caps_{}", client_id))
+            .build()?;
         let pay_caps = create_rtp_caps(&config.video.codec, payload_type)?;
         pay_capsfilter.set_property("caps", &pay_caps);
         
-        // Add to pipeline and link
-        if let Some(pipeline) = self.webrtcbin.parent().and_then(|p| p.downcast::<gst::Pipeline>().ok()) {
-            pipeline.add_many(&[&pay, &pay_capsfilter])?;
-            gst::Element::link_many(&[&self.queue, &pay, &pay_capsfilter])?;
-            
-            // Link to webrtcbin
-            let sink_pad = self.webrtcbin.request_pad_simple("sink_%u")
-                .ok_or_else(|| anyhow::anyhow!("Failed to request sink pad from webrtcbin"))?;
-            let src_pad = pay_capsfilter.static_pad("src")
-                .ok_or_else(|| anyhow::anyhow!("Failed to get src pad from capsfilter"))?;
-            src_pad.link(&sink_pad)?;
-            
-            // Sync states
-            pay.sync_state_with_parent()?;
-            pay_capsfilter.sync_state_with_parent()?;
-            
-            // Start pipeline if needed
-            if pipeline.current_state() != gst::State::Playing {
-                log::info!("Setting pipeline to Playing state");
-                pipeline.set_state(gst::State::Playing)?;
-            }
+        // Store elements for cleanup
+        {
+            let mut payloader_elements = self.payloader_elements.lock().await;
+            payloader_elements.push(pay.clone());
+            payloader_elements.push(pay_capsfilter.clone());
         }
+        
+        // Add to pipeline and link
+        self.pipeline.add_many(&[&pay, &pay_capsfilter])?;
+        gst::Element::link_many(&[&self.queue, &pay, &pay_capsfilter])?;
+        
+        // Link to webrtcbin
+        let sink_pad = self.webrtcbin.request_pad_simple("sink_%u")
+            .ok_or_else(|| anyhow::anyhow!("Failed to request sink pad from webrtcbin"))?;
+        let src_pad = pay_capsfilter.static_pad("src")
+            .ok_or_else(|| anyhow::anyhow!("Failed to get src pad from capsfilter"))?;
+        src_pad.link(&sink_pad)?;
+        
+        // Store sink pad for cleanup
+        {
+            let mut webrtc_sink_pad = self.webrtc_sink_pad.lock().await;
+            *webrtc_sink_pad = Some(sink_pad);
+        }
+        
+        // Sync states - this will properly handle sticky events since the main pipeline
+        // is already running and the tee has a dummy sink connected
+        pay.sync_state_with_parent()?;
+        pay_capsfilter.sync_state_with_parent()?;
+        
+        log::debug!("WebRTC client branch created and synced with pipeline");
         
         // Process SDP offer
         let sdp_msg = gst_sdp::SDPMessage::parse_buffer(sdp.as_bytes())?;
@@ -279,16 +327,65 @@ impl WebRTCClient {
         Ok(())
     }
 
-    async fn cleanup(&self) -> Result<()> {
-        log::debug!("Cleaning up WebRTC client elements");
+    /// Properly cleanup WebRTC resources to prevent memory leaks
+    pub fn cleanup(&mut self) {
+        info!("Cleaning up WebRTC client resources");
         
+        // Force state change to NULL to release resources
+        if let Err(e) = self.webrtcbin.set_state(gst::State::Null) {
+            warn!("Failed to set webrtcbin to NULL state: {}", e);
+        }
+        
+        // Remove from pipeline if still connected
+        if let Some(parent) = self.webrtcbin.parent() {
+            if let Some(bin) = parent.downcast_ref::<gst::Bin>() {
+                if let Err(e) = bin.remove(&self.webrtcbin) {
+                    warn!("Failed to remove webrtcbin from pipeline: {}", e);
+                }
+            }
+        }
+        
+        info!("WebRTC client cleanup completed");
+    }
+
+
+}
+
+// Implement Drop to ensure cleanup happens even if something goes wrong
+impl Drop for WebRTCClient {
+    fn drop(&mut self) {
+        log::debug!("WebRTCClient Drop called - performing emergency cleanup");
+        
+        // Set elements to NULL state
         let _ = self.webrtcbin.set_state(gst::State::Null);
         let _ = self.queue.set_state(gst::State::Null);
         
-        // Note: Actual removal from pipeline should be handled by the caller
-        // since we need access to the pipeline and tee elements
+        // Clean up payloader elements
+        if let Ok(mut payloader_elements) = self.payloader_elements.try_lock() {
+            for element in payloader_elements.iter() {
+                let _ = element.set_state(gst::State::Null);
+            }
+            if !payloader_elements.is_empty() {
+                let elements_refs: Vec<&gst::Element> = payloader_elements.iter().collect();
+                let _ = self.pipeline.remove_many(&elements_refs);
+            }
+            payloader_elements.clear();
+        }
         
-        Ok(())
+        // Release webrtc sink pad
+        if let Ok(mut webrtc_sink_pad) = self.webrtc_sink_pad.try_lock() {
+            if let Some(pad) = webrtc_sink_pad.take() {
+                self.webrtcbin.release_request_pad(&pad);
+            }
+        }
+        
+        // Remove main client elements from pipeline
+        let _ = self.pipeline.remove_many(&[&self.queue, &self.webrtcbin]);
+        
+        // Release tee pad
+        if let Some(tee) = self.tee_src_pad.parent_element() {
+            tee.release_request_pad(&self.tee_src_pad);
+        }
     }
 }
 

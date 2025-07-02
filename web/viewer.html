@@ -181,7 +181,7 @@
             stateElement.textContent = message;
         };
 
-        const startStream = (port, videoElem, cameraName, receiveSensorData = false) => {
+        const startStream = async (port, videoElem, cameraName, receiveSensorData = false) => {
             const pc = new RTCPeerConnection({
                 iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
             });
@@ -233,13 +233,27 @@
 
             ws.onopen = async () => {
                 try {
-                    // Prefer VP8 to match the server's VP8 encoder
+                    // Fetch server configuration to get the correct codec
+                    let serverCodec = 'vp8'; // Default fallback
+                    try {
+                        const response = await fetch(`http://${RPI_IP}:8080/api/config`);
+                        const config = await response.json();
+                        serverCodec = config.codec.toLowerCase();
+                        log(`${cameraName}: Server using ${serverCodec.toUpperCase()} codec`);
+                    } catch (e) {
+                        log(`${cameraName}: Failed to fetch server config, using VP8 default: ${e}`);
+                    }
+
+                    // Set codec preference to match server
                     const receiveCodecs = RTCRtpReceiver.getCapabilities('video').codecs;
-                    const vp8Codecs = receiveCodecs.filter(c => c.mimeType.toLowerCase() === 'video/vp8');
+                    const preferredCodecs = receiveCodecs.filter(c => 
+                        c.mimeType.toLowerCase() === `video/${serverCodec}`);
                     const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
-                    if (vp8Codecs.length && transceiver.setCodecPreferences) {
-                        transceiver.setCodecPreferences(vp8Codecs);
-                        log(`${cameraName}: Set VP8 codec preference`);
+                    if (preferredCodecs.length && transceiver.setCodecPreferences) {
+                        transceiver.setCodecPreferences(preferredCodecs);
+                        log(`${cameraName}: Set ${serverCodec.toUpperCase()} codec preference`);
+                    } else {
+                        log(`${cameraName}: ${serverCodec.toUpperCase()} codec not supported, using default`);
                     }
 
                     const offer = await pc.createOffer();

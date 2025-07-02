@@ -1,7 +1,11 @@
 use anyhow::Result;
-use std::thread;
-use tokio::time::Duration;
 use clap::Parser;
+use gstreamer as gst;
+use log::info;
+use std::thread;
+use std::time::Duration;
+use tokio::time::Duration as TokioDuration;
+
 
 mod config;
 mod sensors;
@@ -193,7 +197,7 @@ async fn data_producer_task(config: config::Config) -> Result<()> {
 
 fn get_local_ip() -> String {
     // Try to get the actual IP address, fallback to localhost
-    use std::net::{UdpSocket, SocketAddr};
+    use std::net::UdpSocket;
     
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(()) = socket.connect("8.8.8.8:80") {
@@ -213,6 +217,9 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
     log::info!("Starting application with args: {:?}", args);
 
+    // Initialize GStreamer once globally
+    gst::init()?;
+
     let config_master = load_config()?;
     
     // Determine PI IP address
@@ -228,8 +235,9 @@ async fn main() -> Result<()> {
 
     // Spawn the integrated web server
     let web_pi_ip = pi_ip.clone();
-    let web_handle = tokio::spawn(async move {
-        if let Err(e) = run_web_server(args.web_port, web_pi_ip).await {
+    let web_config = config_master.clone();
+    let _web_handle = tokio::spawn(async move {
+        if let Err(e) = run_web_server(args.web_port, web_pi_ip, web_config).await {
             log::error!("Web server failed: {}", e);
         }
     });
@@ -246,6 +254,27 @@ async fn main() -> Result<()> {
     let mut cfg_cam2 = cfg_cam1.clone();
     cfg_cam2.camera_1 = cfg_cam2.camera_2.clone();
     let handle_cam2 = tokio::spawn(gst_webrtc::run_camera(cfg_cam2.clone(), cfg_cam2.camera_1.clone(), port_cam2));
+
+    // Start periodic memory cleanup task
+    let _cleanup_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TokioDuration::from_secs(300)); // Every 5 minutes
+        
+        loop {
+            interval.tick().await;
+            
+            // Log memory usage for monitoring
+            if let Ok(mem_info) = std::fs::read_to_string("/proc/self/status") {
+                for line in mem_info.lines() {
+                    if line.starts_with("VmRSS:") || line.starts_with("VmSize:") {
+                        info!("Memory usage: {}", line);
+                    }
+                }
+            }
+            
+            // Request garbage collection hint
+            std::hint::black_box(());
+        }
+    });
 
     log::info!("All tasks spawned. Application is running.");
 
