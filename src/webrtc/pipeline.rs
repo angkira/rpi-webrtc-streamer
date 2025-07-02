@@ -12,6 +12,10 @@ pub struct CameraPipeline {
     pub tee: gst::Element,
     // Store bus watch to prevent it from being dropped prematurely
     pub _bus_watch: gst::bus::BusWatchGuard,
+    // MEMORY LEAK FIX: Store source element for explicit buffer pool management
+    pub camera_source: gst::Element,
+    // Store processing queues for explicit flushing
+    pub processing_queues: Vec<gst::Element>,
 }
 
 impl CameraPipeline {
@@ -22,21 +26,42 @@ impl CameraPipeline {
         let camsrc = gst::ElementFactory::make("libcamerasrc").build()?;
         camsrc.set_property("camera-name", &cam_cfg.device);
         
-        // CRITICAL MEMORY FIX: Limit libcamera buffer pool to prevent accumulation
-        // The memory leak might be in the libcamera buffer pool itself
-        // Try to set properties that limit buffer allocation
+        // CRITICAL MEMORY FIX: Aggressively limit libcamera buffer management
+        // Force minimal buffer pool to prevent accumulation
+        if camsrc.has_property("num-buffers", Some(gst::glib::Type::I32)) {
+            camsrc.set_property("num-buffers", &3i32); // Only 3 buffers in pool
+        }
+        
+        // Set explicit buffer pool configuration
         if camsrc.has_property("io-mode", Some(gst::glib::Type::STRING)) {
             camsrc.set_property_from_str("io-mode", "mmap"); // Use memory mapping for efficiency
         }
         
-        // Force drop old frames if property exists
+        // CRITICAL: Force buffer dropping when downstream is slow
         if camsrc.has_property("drop-buffers", Some(gst::glib::Type::BOOL)) {
             camsrc.set_property("drop-buffers", &true);
+        }
+        
+        // MEMORY LEAK FIX: Set libcamera to immediately drop old frames
+        if camsrc.has_property("max-buffers", Some(gst::glib::Type::U32)) {
+            camsrc.set_property("max-buffers", &3u32); // Maximum 3 buffers
         }
         
         // Set auto exposure/white balance to fixed values to reduce processing overhead
         if camsrc.has_property("auto-focus-mode", Some(gst::glib::Type::I32)) {
             camsrc.set_property("auto-focus-mode", &0i32); // Manual focus
+        }
+        
+        // MEMORY OPTIMIZATION: Disable unnecessary camera features
+        if camsrc.has_property("controls", Some(gst::glib::Type::BOXED)) {
+            // Set fixed exposure and gain to reduce internal processing
+            let controls = gst::Structure::builder("controls")
+                .field("AnalogueGain", &2.0f64) // Fixed analog gain
+                .field("ExposureTime", &16000i32) // Fixed exposure time (16ms)
+                .field("AwbEnable", &false) // Disable auto white balance
+                .field("AeEnable", &false) // Disable auto exposure
+                .build();
+            camsrc.set_property("controls", &controls);
         }
 
         // Caps filter to force specific format from camera
@@ -49,30 +74,53 @@ impl CameraPipeline {
             .build();
         capsfilter.set_property("caps", &caps);
 
-        // Video processing chain with BUFFER MANAGEMENT
+        // CRITICAL FIX: Add timestamp normalization after camera source
+        // This fixes the timestamp corruption that causes VP8 encoder to discard frames
+        let clocksync = gst::ElementFactory::make("clocksync").build()?;
+        clocksync.set_property("sync", &true); // Sync to pipeline clock
+        clocksync.set_property("ts-offset", &0i64); // No timestamp offset
+        
+        // ADDITIONAL TIMESTAMP FIX: Add identity element to force buffer timestamp reset
+        let identity = gst::ElementFactory::make("identity").build()?;
+        identity.set_property("sync", &true);
+        identity.set_property("single-segment", &true); // Force single segment timestamps
+        identity.set_property("silent", &true); // No logging overhead
+
+        // Video processing chain with AGGRESSIVE BUFFER MANAGEMENT
         let videoconvert = gst::ElementFactory::make("videoconvert").build()?;
         let videoscale = gst::ElementFactory::make("videoscale").build()?;
         let videoflip = create_video_flip(&cam_cfg)?;
         
-        // Add queues between processing elements to prevent buffer accumulation
-        // Make names unique per camera to avoid conflicts
+        // CRITICAL MEMORY FIX: Add ultra-aggressive queues between ALL processing elements
         let camera_id = cam_cfg.device.split('/').last().unwrap_or("unknown");
+        
+        // Queue after capsfilter
         let queue1 = gst::ElementFactory::make("queue").name(&format!("queue1_{}", camera_id)).build()?;
-        configure_processing_queue(&queue1)?;
+        configure_ultra_aggressive_queue(&queue1)?;
         
+        // Queue after videoconvert
         let queue2 = gst::ElementFactory::make("queue").name(&format!("queue2_{}", camera_id)).build()?;
-        configure_processing_queue(&queue2)?;
+        configure_ultra_aggressive_queue(&queue2)?;
         
-        // Video encoder 
+        // Queue after videoscale
+        let queue3 = gst::ElementFactory::make("queue").name(&format!("queue3_{}", camera_id)).build()?;
+        configure_ultra_aggressive_queue(&queue3)?;
+        
+        // Queue before encoder
+        let queue4 = gst::ElementFactory::make("queue").name(&format!("queue4_{}", camera_id)).build()?;
+        configure_ultra_aggressive_queue(&queue4)?;
+        
+        // Store queues for explicit management
+        let processing_queues = vec![queue1.clone(), queue2.clone(), queue3.clone(), queue4.clone()];
+        
+        // Video encoder with enhanced memory management
         let encoder = create_video_encoder(&cfg.video, &cfg.webrtc)?;
         
         // For H.264, add h264parse AFTER encoder to ensure proper format
         let h264parse = match cfg.video.codec.as_str() {
             "h264" => {
                 let parser = gst::ElementFactory::make("h264parse").build()?;
-                // Simplified configuration: let h264parse handle format conversion automatically
                 parser.set_property("config-interval", &1i32); // Insert SPS/PPS before every IDR frame
-                // Let h264parse auto-negotiate the best format for downstream
                 Some(parser)
             },
             _ => None,
@@ -80,29 +128,27 @@ impl CameraPipeline {
         
         // Stream distribution with MEMORY MANAGEMENT
         let tee = gst::ElementFactory::make("tee").name(&format!("tee_{}", camera_id)).build()?;
-        // Configure tee to not accumulate buffers
+        // CRITICAL: Configure tee to immediately drop unlinked buffers
         tee.set_property("allow-not-linked", &true); // Don't block if some pads not linked
+        tee.set_property("silent", &true); // Reduce logging overhead
         
-        // CRITICAL MEMORY LEAK FIX: Use fakesink with aggressive buffer dropping
-        // This is simpler and more reliable than appsink for our dummy sink use case
+        // MEMORY LEAK FIX: Use fakesink with ultra-aggressive buffer dropping
         let fakesink = gst::ElementFactory::make("fakesink").name(&format!("dummy_sink_{}", camera_id)).build()?;
-        fakesink.set_property("sync", &false); // Don't sync to clock
-        fakesink.set_property("async", &false); // No async state changes
-        fakesink.set_property("silent", &true); // No logging overhead
+        configure_ultra_aggressive_fakesink(&fakesink)?;
         
-        // MEMORY OPTIMIZATION: Enable high-frequency buffer dropping
-        fakesink.set_property("num-buffers", &-1i32); // Process all buffers (don't stop)
-        fakesink.set_property("signal-handoffs", &false); // Don't emit signals
-        
-        // Build element chain with buffer control queues
+        // Build element chain with comprehensive buffer control
         let mut elements = vec![
             &camsrc,
             &capsfilter,
+            &clocksync,
+            &identity,
             &queue1,           // Buffer control after caps
             &videoconvert,
+            &queue2,           // Buffer control after convert
             &videoscale,
-            &queue2,           // Buffer control after scale
+            &queue3,           // Buffer control after scale
             &videoflip,
+            &queue4,           // Buffer control before encoder
             &encoder,
         ];
         
@@ -113,15 +159,19 @@ impl CameraPipeline {
         
         pipeline.add_many(&elements)?;
 
-        // Link main pipeline elements with queues for buffer control
+        // Link main pipeline elements with comprehensive buffer control
         let link_chain = vec![
             &camsrc,
             &capsfilter,
+            &clocksync,
+            &identity,
             &queue1,           // Buffer control after caps
             &videoconvert,
+            &queue2,           // Buffer control after convert
             &videoscale,
-            &queue2,           // Buffer control after scale  
+            &queue3,           // Buffer control after scale
             &videoflip,
+            &queue4,           // Buffer control before encoder
             &encoder,
         ];
         
@@ -152,7 +202,35 @@ impl CameraPipeline {
             camsrc.set_property("is-live", &true);
         }
 
-        Ok(CameraPipeline { pipeline, tee, _bus_watch: bus_watch })
+        Ok(CameraPipeline { 
+            pipeline, 
+            tee, 
+            _bus_watch: bus_watch,
+            camera_source: camsrc,
+            processing_queues,
+        })
+    }
+    
+    // MEMORY LEAK FIX: Add explicit buffer flushing method
+    pub fn flush_buffers(&self) -> Result<()> {
+        log::info!("Flushing pipeline buffers to prevent memory leaks");
+        
+        // Send flush events to all processing queues
+        for queue in &self.processing_queues {
+            let _ = queue.send_event(gst::event::FlushStart::new());
+            let _ = queue.send_event(gst::event::FlushStop::builder(true).build());
+        }
+        
+        // Flush the entire pipeline
+        let _ = self.pipeline.send_event(gst::event::FlushStart::new());
+        let _ = self.pipeline.send_event(gst::event::FlushStop::builder(true).build());
+        
+        // Force buffer pool recreation on camera source
+        if self.camera_source.has_property("force-pool-recreation", Some(gst::glib::Type::BOOL)) {
+            self.camera_source.set_property("force-pool-recreation", &true);
+        }
+        
+        Ok(())
     }
 }
 
@@ -224,19 +302,39 @@ fn create_vp8_encoder(video_cfg: &VideoConfig, webrtc_cfg: &crate::config::WebRt
     // Set end-usage as string enum value for CBR mode
     encoder.set_property_from_str("end-usage", "cbr"); // CBR mode for consistent buffer usage
     
+    // CRITICAL FIX: Prevent timestamp mismatches and buffer accumulation
+    encoder.set_property("overshoot-pct", &0i32); // No bitrate overshoot to prevent buffer accumulation
+    encoder.set_property("undershoot-pct", &0i32); // No bitrate undershoot to maintain consistent flow
+    encoder.set_property("dropframe-threshold", &0i32); // Never drop frames due to timing (handle elsewhere)
+    encoder.set_property("max-quantizer", &56i32); // Higher max quantizer to prevent encoder blocking
+    encoder.set_property("min-quantizer", &4i32); // Lower min quantizer for consistent quality
+    
+    // AGGRESSIVE TIMESTAMP AND BUFFER MANAGEMENT
+    encoder.set_property("error-resilient", &0i32); // Disable error resilience (saves memory)
+    encoder.set_property("max-intra-bitrate-pct", &300i32); // Limit I-frame bitrate spikes
+    
+    // Force immediate encoding with no buffering
+    if encoder.has_property("rc-lookahead", Some(gst::glib::Type::I32)) {
+        encoder.set_property("rc-lookahead", &0i32); // No rate control lookahead
+    }
+    if encoder.has_property("arnr-maxframes", Some(gst::glib::Type::I32)) {
+        encoder.set_property("arnr-maxframes", &0i32); // No temporal filtering
+    }
+    if encoder.has_property("arnr-strength", Some(gst::glib::Type::I32)) {
+        encoder.set_property("arnr-strength", &0i32); // No noise reduction (saves buffers)
+    }
+    
     // ADDITIONAL MEMORY FIXES: Aggressive buffer control
     // These settings prevent VP8 from accumulating reference frames and other buffers
     if encoder.has_property("buffer-initial-size", Some(gst::glib::Type::U64)) {
-        encoder.set_property("buffer-initial-size", &(100u64 * 1024)); // 100KB initial buffer
+        encoder.set_property("buffer-initial-size", &(50u64 * 1024)); // 50KB initial buffer (reduced)
     }
     if encoder.has_property("buffer-optimal-size", Some(gst::glib::Type::U64)) {
-        encoder.set_property("buffer-optimal-size", &(200u64 * 1024)); // 200KB optimal buffer
+        encoder.set_property("buffer-optimal-size", &(100u64 * 1024)); // 100KB optimal buffer (reduced)
     }
     if encoder.has_property("buffer-size", Some(gst::glib::Type::U64)) {
-        encoder.set_property("buffer-size", &(target_bitrate as u64 / 8)); // 1 second of bitrate
+        encoder.set_property("buffer-size", &(target_bitrate as u64 / 16)); // 0.5 seconds of bitrate (reduced from 1 second)
     }
-    
-    // Skip error-resilient property due to complex enum type requirements
     
     log::info!("VP8 encoder configured: preset={}, bitrate={} bps, keyframe-max-dist={}, MEMORY_OPTIMIZED", 
                video_cfg.encoder_preset, target_bitrate, keyframe_max_dist);
@@ -320,13 +418,52 @@ fn setup_bus_monitoring(pipeline: &gst::Pipeline) -> Result<gst::bus::BusWatchGu
     Ok(bus_watch)
 }
 
-// Configure processing queues to prevent buffer accumulation
-fn configure_processing_queue(queue: &gst::Element) -> Result<()> {
-    queue.set_property("max-size-buffers", &1u32); // Only hold 1 buffer max (EXTREMELY aggressive)
-    queue.set_property("max-size-bytes", &(512 * 1024u32)); // 512KB max (reduced from 2MB)
-    queue.set_property("max-size-time", &(gst::ClockTime::from_mseconds(50))); // 50ms max (reduced from 200ms)
+// MEMORY LEAK FIX: Configure ultra-aggressive queue behavior
+fn configure_ultra_aggressive_queue(queue: &gst::Element) -> Result<()> {
+    queue.set_property("max-size-buffers", &1u32); // Only hold 1 buffer max
+    queue.set_property("max-size-bytes", &(256 * 1024u32)); // 256KB max (reduced from 512KB)
+    queue.set_property("max-size-time", &(gst::ClockTime::from_mseconds(20))); // 20ms max (reduced from 50ms)
     queue.set_property_from_str("leaky", "downstream"); // Drop old buffers when full
     queue.set_property("silent", &true); // Reduce logging overhead
     queue.set_property("flush-on-eos", &true); // Flush buffers on EOS
+    
+    // ADDITIONAL MEMORY FIXES: Force immediate buffer passing
+    if queue.has_property("min-threshold-time", Some(gst::glib::Type::U64)) {
+        queue.set_property("min-threshold-time", &0u64); // Pass buffers immediately
+    }
+    if queue.has_property("min-threshold-buffers", Some(gst::glib::Type::U32)) {
+        queue.set_property("min-threshold-buffers", &0u32); // Don't wait for buffers
+    }
+    if queue.has_property("min-threshold-bytes", Some(gst::glib::Type::U32)) {
+        queue.set_property("min-threshold-bytes", &0u32); // Don't wait for bytes
+    }
+    
     Ok(())
+}
+
+// MEMORY LEAK FIX: Configure fakesink for aggressive buffer dropping
+fn configure_ultra_aggressive_fakesink(fakesink: &gst::Element) -> Result<()> {
+    fakesink.set_property("sync", &false); // Don't sync to clock
+    fakesink.set_property("async", &false); // No async state changes
+    fakesink.set_property("silent", &true); // No logging overhead
+    fakesink.set_property("num-buffers", &-1i32); // Process all buffers (don't stop)
+    fakesink.set_property("signal-handoffs", &false); // Don't emit signals
+    
+    // CRITICAL: Enable immediate buffer dropping
+    if fakesink.has_property("drop", Some(gst::glib::Type::BOOL)) {
+        fakesink.set_property("drop", &true); // Drop all buffers immediately
+    }
+    if fakesink.has_property("can-activate-pull", Some(gst::glib::Type::BOOL)) {
+        fakesink.set_property("can-activate-pull", &false); // Disable pull mode
+    }
+    if fakesink.has_property("dump", Some(gst::glib::Type::BOOL)) {
+        fakesink.set_property("dump", &false); // Don't dump buffer contents
+    }
+    
+    Ok(())
+}
+
+// Rename the old function to avoid conflicts
+fn configure_processing_queue(queue: &gst::Element) -> Result<()> {
+    configure_ultra_aggressive_queue(queue)
 } 

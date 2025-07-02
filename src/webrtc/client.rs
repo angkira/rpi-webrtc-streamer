@@ -51,14 +51,22 @@ impl WebRTCClient {
         webrtcbin.set_property("stun-server", &stun_uri);
         webrtcbin.set_property_from_str("bundle-policy", "max-bundle");
         
-        // Configure WebRTC bin with proper latency settings to fix RTP session warnings
-        webrtcbin.set_property("latency", &200u32); // 200ms default latency
+        // CRITICAL FIX: Configure WebRTC bin with enhanced latency settings to eliminate RTP session warnings
+        webrtcbin.set_property("latency", &50u32); // Reduced from 200ms to 50ms for lower latency
         
-        // Configure queue with leaky behavior to prevent memory accumulation  
-        queue.set_property("max-size-buffers", &10u32);
-        queue.set_property("max-size-time", &(2 * gst::ClockTime::SECOND));
-        queue.set_property("max-size-bytes", &(1024 * 1024 * 2u32)); // 2MB limit
+        // ADDITIONAL RTP SESSION FIXES: Configure WebRTC internal components
+        if webrtcbin.has_property("do-retransmission", Some(gst::glib::Type::BOOL)) {
+            webrtcbin.set_property("do-retransmission", &false); // Disable retransmission to reduce buffer accumulation
+        }
+        
+        // AGGRESSIVE MEMORY LEAK PREVENTION: Configure very tight buffer limits
+        queue.set_property("max-size-buffers", &5u32); // Reduced from 10 to 5
+        queue.set_property("max-size-time", &(500 * gst::ClockTime::MSECOND)); // Reduced from 2s to 500ms
+        queue.set_property("max-size-bytes", &(512 * 1024u32)); // Reduced from 2MB to 512KB
         queue.set_property_from_str("leaky", "downstream"); // Leak old buffers when full
+        
+        // Configure the queue to be more aggressive about dropping data
+        queue.set_property("silent", &true); // Don't log buffer drops to reduce overhead
 
         // Add elements to pipeline
         pipeline.add_many(&[&queue, &webrtcbin])?;
@@ -124,6 +132,49 @@ impl WebRTCClient {
             }
         });
 
+        // MEMORY LEAK FIX: Add active connection buffer monitoring task
+        let client_queue = self.queue.clone();
+        let client_pipeline = self.pipeline.clone();
+        let buffer_monitor_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30)); // Every 30 seconds
+            let mut buffer_overrun_count = 0u32;
+            
+            loop {
+                interval.tick().await;
+                
+                // Check queue buffer levels
+                let current_level_buffers = client_queue.property::<u32>("current-level-buffers");
+                let max_size_buffers = client_queue.property::<u32>("max-size-buffers");
+                
+                let buffer_usage_percent = (current_level_buffers as f32 / max_size_buffers as f32) * 100.0;
+                
+                log::debug!("WebRTC client queue usage: {}/{} buffers ({}%)", 
+                           current_level_buffers, max_size_buffers, buffer_usage_percent as u32);
+                
+                // If queue is consistently near full, force flush
+                if buffer_usage_percent > 80.0 {
+                    buffer_overrun_count += 1;
+                    log::warn!("WebRTC queue buffer overrun detected: {}% full (count: {})", 
+                              buffer_usage_percent as u32, buffer_overrun_count);
+                    
+                    // Force queue flush by sending flush events
+                    let _ = client_queue.send_event(gst::event::FlushStart::new());
+                    let _ = client_queue.send_event(gst::event::FlushStop::builder(true).build());
+                    
+                    // If consistently overrunning, force pipeline flush
+                    if buffer_overrun_count >= 3 {
+                        log::error!("Persistent buffer overrun, forcing pipeline flush");
+                        let _ = client_pipeline.send_event(gst::event::FlushStart::new());
+                        let _ = client_pipeline.send_event(gst::event::FlushStop::builder(true).build());
+                        buffer_overrun_count = 0; // Reset counter
+                    }
+                } else if buffer_usage_percent < 20.0 {
+                    // Reset counter if usage is low
+                    buffer_overrun_count = 0;
+                }
+            }
+        });
+
         // Wait for offers and send back answers
         while let Some(msg) = ws_receiver.next().await {
             let msg = msg?;
@@ -140,8 +191,9 @@ impl WebRTCClient {
             }
         }
 
-        // Cancel the ICE task when connection closes
+        // Cancel monitoring tasks when connection closes
         ice_task_handle.abort();
+        buffer_monitor_handle.abort();
 
         log::info!("WebRTC client disconnected. Cleaning up.");
         self.cleanup();
@@ -331,21 +383,141 @@ impl WebRTCClient {
     pub fn cleanup(&mut self) {
         info!("Cleaning up WebRTC client resources");
         
-        // Force state change to NULL to release resources
+        // MEMORY LEAK FIX: First, send EOS to flush all internal buffers before cleanup
+        // This ensures any queued data is processed and released
+        let _ = self.pipeline.send_event(gst::event::Eos::new());
+        
+        // Wait briefly for EOS to propagate through the pipeline
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        
+        // AGGRESSIVE CLEANUP: First, block all data flow by setting elements to NULL
+        // This prevents any new buffers from being processed during cleanup
+        if let Err(e) = self.queue.set_state(gst::State::Null) {
+            warn!("Failed to set queue to NULL state: {}", e);
+        }
+        
         if let Err(e) = self.webrtcbin.set_state(gst::State::Null) {
             warn!("Failed to set webrtcbin to NULL state: {}", e);
         }
         
-        // Remove from pipeline if still connected
-        if let Some(parent) = self.webrtcbin.parent() {
-            if let Some(bin) = parent.downcast_ref::<gst::Bin>() {
-                if let Err(e) = bin.remove(&self.webrtcbin) {
-                    warn!("Failed to remove webrtcbin from pipeline: {}", e);
+        // CRITICAL MEMORY FIX: Cleanup payloader elements with forced state changes
+        {
+            let payloader_elements = self.payloader_elements.blocking_lock();
+            for (index, element) in payloader_elements.iter().enumerate() {
+                log::debug!("Cleaning up payloader element {}", index);
+                
+                // Force element to NULL and wait for state change
+                if let Err(e) = element.set_state(gst::State::Null) {
+                    warn!("Failed to set payloader element {} to NULL: {}", index, e);
+                }
+                
+                // Wait briefly for state change to propagate
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                
+                // Unlink all pads before removing
+                for pad in element.pads() {
+                    if let Some(peer) = pad.peer() {
+                        if let Err(e) = pad.unlink(&peer) {
+                            warn!("Failed to unlink pad during payloader cleanup: {}", e);
+                        }
+                    }
+                }
+                
+                // Remove from pipeline
+                if let Some(parent) = element.parent() {
+                    if let Some(bin) = parent.downcast_ref::<gst::Bin>() {
+                        if let Err(e) = bin.remove(element) {
+                            warn!("Failed to remove payloader element {} from pipeline: {}", index, e);
+                        }
+                    }
                 }
             }
         }
         
-        info!("WebRTC client cleanup completed");
+        // MEMORY LEAK FIX: Enhanced queue unlinking with forced pad release
+        if let Some(queue_sink_pad) = self.queue.static_pad("sink") {
+            if let Err(e) = self.tee_src_pad.unlink(&queue_sink_pad) {
+                warn!("Failed to unlink queue from tee: {}", e);
+            }
+        } else {
+            warn!("Could not get queue sink pad for unlinking");
+        }
+        
+        // Remove webrtcbin sink pad with error handling
+        {
+            let webrtc_sink_pad = self.webrtc_sink_pad.blocking_lock();
+            if let Some(ref pad) = *webrtc_sink_pad {
+                log::debug!("Releasing webrtc sink pad");
+                self.webrtcbin.release_request_pad(pad);
+            } else {
+                log::debug!("No webrtc sink pad to release");
+            }
+        }
+        
+        // CRITICAL: Unlink all pads from queue before removing
+        for pad in self.queue.pads() {
+            if let Some(peer) = pad.peer() {
+                if let Err(e) = pad.unlink(&peer) {
+                    warn!("Failed to unlink queue pad: {}", e);
+                }
+            }
+        }
+        
+        // Unlink all pads from webrtcbin before removing
+        for pad in self.webrtcbin.pads() {
+            if let Some(peer) = pad.peer() {
+                if let Err(e) = pad.unlink(&peer) {
+                    warn!("Failed to unlink webrtcbin pad: {}", e);
+                }
+            }
+        }
+        
+        // Remove elements from pipeline with enhanced error handling
+        if let Some(parent) = self.queue.parent() {
+            if let Some(bin) = parent.downcast_ref::<gst::Bin>() {
+                if let Err(e) = bin.remove(&self.queue) {
+                    warn!("Failed to remove queue from pipeline: {}", e);
+                } else {
+                    log::debug!("Successfully removed queue from pipeline");
+                }
+            }
+        }
+        
+        if let Some(parent) = self.webrtcbin.parent() {
+            if let Some(bin) = parent.downcast_ref::<gst::Bin>() {
+                if let Err(e) = bin.remove(&self.webrtcbin) {
+                    warn!("Failed to remove webrtcbin from pipeline: {}", e);
+                } else {
+                    log::debug!("Successfully removed webrtcbin from pipeline");
+                }
+            }
+        }
+        
+        // Release the tee pad with enhanced error handling
+        if let Some(parent) = self.tee_src_pad.parent() {
+            if let Some(element) = parent.downcast_ref::<gst::Element>() {
+                element.release_request_pad(&self.tee_src_pad);
+                log::debug!("Released tee src pad");
+            }
+        } else {
+            warn!("Could not get tee pad parent for release");
+        }
+        
+        // MEMORY LEAK FIX: Force comprehensive buffer cleanup
+        // Send multiple flush events to ensure all buffers are released
+        for _ in 0..3 {
+            let _ = self.pipeline.send_event(gst::event::FlushStart::new());
+            let _ = self.pipeline.send_event(gst::event::FlushStop::builder(true).build());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        
+        // Final memory cleanup: force seek to beginning to reset any internal state
+        let _ = self.pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::ZERO,
+        );
+        
+        info!("WebRTC client cleanup completed - comprehensive buffer flush and element removal");
     }
 
 

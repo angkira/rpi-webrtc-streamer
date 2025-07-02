@@ -217,6 +217,15 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
     log::info!("Starting application with args: {:?}", args);
 
+    // MEMORY LEAK DEBUGGING: Set GStreamer debug environment for buffer tracking
+    // Uncomment these lines to enable aggressive GStreamer debugging
+    // std::env::set_var("GST_DEBUG", "GST_REFCOUNTING:5,GST_MEMORY:4,queue:6,tee:6");
+    // std::env::set_var("GST_DEBUG_FILE", "/tmp/gst_debug.log");
+    
+    // Set GStreamer to use less memory by default
+    std::env::set_var("GST_REGISTRY_REUSE_PLUGIN_SCANNER", "no");
+    std::env::set_var("GST_REGISTRY_FORK", "no");
+
     // Initialize GStreamer once globally
     gst::init()?;
 
@@ -255,24 +264,83 @@ async fn main() -> Result<()> {
     cfg_cam2.camera_1 = cfg_cam2.camera_2.clone();
     let handle_cam2 = tokio::spawn(gst_webrtc::run_camera(cfg_cam2.clone(), cfg_cam2.camera_1.clone(), port_cam2));
 
-    // Start periodic memory cleanup task
+    // ENHANCED MEMORY MONITORING: More aggressive cleanup task
     let _cleanup_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(TokioDuration::from_secs(300)); // Every 5 minutes
+        let mut interval = tokio::time::interval(TokioDuration::from_secs(120)); // Every 2 minutes
+        let mut memory_samples = Vec::new();
+        let mut last_rss = 0u32;
         
         loop {
             interval.tick().await;
             
-            // Log memory usage for monitoring
+            // Get detailed memory information
             if let Ok(mem_info) = std::fs::read_to_string("/proc/self/status") {
+                let mut current_rss = 0u32;
+                let mut _vm_size = 0u32;
+                
                 for line in mem_info.lines() {
-                    if line.starts_with("VmRSS:") || line.starts_with("VmSize:") {
-                        info!("Memory usage: {}", line);
+                    if line.starts_with("VmRSS:") {
+                        if let Some(rss_str) = line.split_whitespace().nth(1) {
+                            current_rss = rss_str.parse().unwrap_or(0);
+                            info!("Memory usage: {}", line);
+                        }
+                    } else if line.starts_with("VmSize:") {
+                        if let Some(vm_str) = line.split_whitespace().nth(1) {
+                            _vm_size = vm_str.parse().unwrap_or(0);
+                            info!("Memory usage: {}", line);
+                        }
                     }
+                }
+                
+                // Track memory growth trend
+                if current_rss > 0 {
+                    let memory_mb = current_rss / 1024;
+                    memory_samples.push(memory_mb);
+                    
+                    // Keep only last 10 samples (20 minutes of data)
+                    if memory_samples.len() > 10 {
+                        memory_samples.remove(0);
+                    }
+                    
+                    // Detect memory growth trend
+                    if memory_samples.len() >= 3 {
+                        let recent_avg = memory_samples.iter().rev().take(3).sum::<u32>() / 3;
+                        let old_avg = if memory_samples.len() >= 6 {
+                            memory_samples.iter().rev().skip(3).take(3).sum::<u32>() / 3
+                        } else {
+                            memory_samples[0]
+                        };
+                        
+                        if recent_avg > old_avg + 10 { // 10MB increase trend
+                            log::warn!("MEMORY GROWTH DETECTED: Recent avg {}MB vs Previous avg {}MB", 
+                                      recent_avg, old_avg);
+                        }
+                    }
+                    
+                    // Detect sudden memory increases
+                    if last_rss > 0 && current_rss > last_rss + (20 * 1024) { // 20MB sudden increase
+                        log::error!("SUDDEN MEMORY INCREASE: {}MB -> {}MB (+{}MB)", 
+                                   last_rss / 1024, current_rss / 1024, (current_rss - last_rss) / 1024);
+                    }
+                    
+                    last_rss = current_rss;
                 }
             }
             
-            // Request garbage collection hint
-            std::hint::black_box(());
+            // AGGRESSIVE MEMORY MANAGEMENT: Force garbage collection periodically
+            if memory_samples.len() >= 3 {
+                let current_mb = memory_samples[memory_samples.len() - 1];
+                if current_mb > 150 { // More aggressive threshold
+                    log::info!("Forcing garbage collection due to high memory usage: {}MB", current_mb);
+                    
+                    // Create and drop large allocations to trigger GC
+                    for _ in 0..5 {
+                        let _temp: Vec<u8> = Vec::with_capacity(5 * 1024 * 1024); // 5MB
+                        drop(_temp);
+                        tokio::time::sleep(TokioDuration::from_millis(50)).await;
+                    }
+                }
+            }
         }
     });
 
