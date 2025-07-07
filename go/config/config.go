@@ -109,7 +109,7 @@ func LoadConfig(configPath string) (*Config, error) {
 			Height:     480,
 			FPS:        30,
 			WebRTCPort: 5557,
-			FlipMethod: "rotate-180",
+			FlipMethod: "vertical-flip",
 		},
 		Camera2: CameraConfig{
 			Device:     "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10",
@@ -117,7 +117,7 @@ func LoadConfig(configPath string) (*Config, error) {
 			Height:     480,
 			FPS:        30,
 			WebRTCPort: 5558,
-			FlipMethod: "rotate-180",
+			FlipMethod: "vertical-flip",
 		},
 		Server: ServerConfig{
 			WebPort: 8080,
@@ -173,6 +173,9 @@ func LoadConfig(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to decode config file: %w", err)
 		}
 		logger.Info("Config loaded from file", zap.String("path", configPath))
+		logger.Info("Camera flip methods", 
+			zap.String("camera1_flip", config.Camera1.FlipMethod),
+			zap.String("camera2_flip", config.Camera2.FlipMethod))
 	} else {
 		logger.Info("Config file not found, using defaults", zap.String("path", configPath))
 	}

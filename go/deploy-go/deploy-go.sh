@@ -7,7 +7,7 @@ set -x # Print commands and their arguments as they are executed.
 # --- Configuration ---
 DEPLOY_FILE="deploy-go/.deploy-go"
 SERVICE_FILE="deploy-go/pi-camera-streamer.service"
-APP_CONFIG="config/config.toml"
+APP_CONFIG="config.toml"
 
 if [ ! -f "$DEPLOY_FILE" ]; then
     echo "🔴 Error: Go deployment configuration file not found at '$DEPLOY_FILE'."

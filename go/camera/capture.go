@@ -243,6 +243,9 @@ func (c *Capture) gstreamerCaptureLoop() {
 func (c *Capture) startGStreamerCapture() error {
 	c.gstCtx, c.gstCancel = context.WithCancel(context.Background())
 
+	// Check GStreamer plugin availability for better diagnostics
+	c.checkGStreamerPlugins()
+
 	// Build GStreamer pipeline
 	pipeline := c.buildGStreamerPipeline()
 	// Keep GStreamer quiet now that we've resolved the format negotiation issue.
@@ -261,6 +264,19 @@ func (c *Capture) startGStreamerCapture() error {
 	}
 
 	c.logger.Info("Starting GStreamer capture", zap.String("pipeline", pipeline))
+
+	// Log the complete pipeline for debugging
+	c.logger.Debug("Complete GStreamer pipeline", 
+		zap.String("pipeline", pipeline),
+		zap.String("device_path", c.devicePath),
+		zap.String("flip_method", c.config.FlipMethod),
+		zap.String("codec", c.videoConfig.Codec))
+
+	// Test pipeline syntax before running
+	if err := c.testGStreamerPipeline(pipeline); err != nil {
+		c.logger.Warn("Pipeline syntax test failed, but continuing anyway", zap.Error(err))
+		// Continue anyway as the test might fail due to missing plugins on the build system
+	}
 
 	// Start GStreamer process
 	if err := c.gstCmd.Start(); err != nil {
@@ -302,24 +318,29 @@ func (c *Capture) buildGStreamerPipeline() string {
 	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
 		c.config.Width, c.config.Height, c.config.FPS))
 
-	// 4. Add a queue for stability, placed after the heavy conversion work.
-	pipeline.WriteString(" ! queue")
-
-	// 5. (Optional) Add flip/rotation if specified.
+	// 4. Add flip/rotation BEFORE the queue and encoding for better performance
 	if c.config.FlipMethod != "" {
-		switch c.config.FlipMethod {
-		case "rotate-180":
-			pipeline.WriteString(" ! videoflip method=rotate-180")
-		case "rotate-90":
-			pipeline.WriteString(" ! videoflip method=clockwise")
-		case "rotate-270":
-			pipeline.WriteString(" ! videoflip method=counterclockwise")
-		case "vertical-flip":
-			pipeline.WriteString(" ! videoflip method=vertical-flip")
-		case "horizontal-flip":
-			pipeline.WriteString(" ! videoflip method=horizontal-flip")
+		c.logger.Info("Adding video flip to pipeline", zap.String("method", c.config.FlipMethod))
+		
+		// Get the appropriate flip pipeline element
+		flipElement, err := c.getFlipPipelineElement(c.config.FlipMethod)
+		if err != nil {
+			c.logger.Error("Failed to get flip pipeline element", 
+				zap.String("method", c.config.FlipMethod), 
+				zap.Error(err))
+			// Continue without flip rather than failing completely
+		} else {
+			pipeline.WriteString(flipElement)
+			c.logger.Info("Flip element added to pipeline", 
+				zap.String("method", c.config.FlipMethod),
+				zap.String("element", flipElement))
 		}
+	} else {
+		c.logger.Info("No flip method specified, skipping videoflip")
 	}
+
+	// 5. Add a queue for stability, placed after the flip operation
+	pipeline.WriteString(" ! queue")
 
 	// 6. Add encoding based on codec.
 	c.logger.Info("Building GStreamer pipeline with codec", zap.String("codec", c.videoConfig.Codec))
@@ -385,7 +406,35 @@ func (c *Capture) getAvailableH264Encoder() string {
 func (c *Capture) isGStreamerElementAvailable(element string) bool {
 	cmd := exec.Command("gst-inspect-1.0", element)
 	err := cmd.Run()
-	return err == nil
+	if err != nil {
+		c.logger.Debug("GStreamer element not available", zap.String("element", element), zap.Error(err))
+		return false
+	}
+	c.logger.Debug("GStreamer element available", zap.String("element", element))
+	return true
+}
+
+// checkGStreamerPlugins checks if required GStreamer plugins are available
+func (c *Capture) checkGStreamerPlugins() {
+	requiredPlugins := []string{
+		"libcamerasrc",
+		"videoconvert", 
+		"videoflip",
+		"videotransform",
+		"x264enc",
+		"vp8enc",
+		"h264parse",
+		"ivfparse",
+	}
+	
+	c.logger.Info("Checking GStreamer plugin availability")
+	for _, plugin := range requiredPlugins {
+		if c.isGStreamerElementAvailable(plugin) {
+			c.logger.Debug("Plugin available", zap.String("plugin", plugin))
+		} else {
+			c.logger.Warn("Plugin not available", zap.String("plugin", plugin))
+		}
+	}
 }
 
 // monitorGStreamer monitors the GStreamer process
@@ -595,4 +644,82 @@ func isAccessUnitDelimiter(nal []byte) bool {
 		return false
 	}
 	return (nal[4] & 0x1F) == 9
+}
+
+// validateFlipMethod validates if the flip method is supported
+func (c *Capture) validateFlipMethod(method string) bool {
+	supportedMethods := []string{
+		"vertical-flip",
+		"horizontal-flip", 
+		"rotate-180",
+		"rotate-90",
+		"rotate-270",
+	}
+	
+	for _, supported := range supportedMethods {
+		if method == supported {
+			return true
+		}
+	}
+	return false
+}
+
+// getFlipPipelineElement returns the appropriate GStreamer pipeline element for the flip method
+func (c *Capture) getFlipPipelineElement(method string) (string, error) {
+	if !c.validateFlipMethod(method) {
+		return "", fmt.Errorf("unsupported flip method: %s", method)
+	}
+	
+	// Try videoflip first
+	if c.isGStreamerElementAvailable("videoflip") {
+		switch method {
+		case "rotate-180":
+			return " ! videoflip method=rotate-180", nil
+		case "rotate-90":
+			return " ! videoflip method=clockwise", nil
+		case "rotate-270":
+			return " ! videoflip method=counterclockwise", nil
+		case "vertical-flip":
+			return " ! videoflip method=vertical-flip", nil
+		case "horizontal-flip":
+			return " ! videoflip method=horizontal-flip", nil
+		}
+	}
+	
+	// Fallback to videotransform
+	if c.isGStreamerElementAvailable("videotransform") {
+		switch method {
+		case "vertical-flip":
+			return " ! videotransform flip-method=vertical-flip", nil
+		case "horizontal-flip":
+			return " ! videotransform flip-method=horizontal-flip", nil
+		case "rotate-180":
+			return " ! videotransform flip-method=rotate-180", nil
+		default:
+			return "", fmt.Errorf("flip method %s not supported by videotransform", method)
+		}
+	}
+	
+	return "", fmt.Errorf("no suitable GStreamer element available for flip method: %s", method)
+}
+
+// testGStreamerPipeline tests if the pipeline syntax is valid
+func (c *Capture) testGStreamerPipeline(pipeline string) error {
+	// Use gst-launch-1.0 --dry-run to test pipeline syntax
+	args := []string{"--dry-run"}
+	args = append(args, strings.Fields(pipeline)...)
+	
+	cmd := exec.Command("gst-launch-1.0", args...)
+	output, err := cmd.CombinedOutput()
+	
+	if err != nil {
+		c.logger.Error("GStreamer pipeline syntax error", 
+			zap.String("pipeline", pipeline),
+			zap.String("error_output", string(output)),
+			zap.Error(err))
+		return fmt.Errorf("GStreamer pipeline syntax error: %w", err)
+	}
+	
+	c.logger.Debug("GStreamer pipeline syntax is valid")
+	return nil
 } 

@@ -102,7 +102,7 @@ deploy: build-arm64
 	@echo "Deploying to Raspberry Pi..."
 	ssh $(PI_USER)@$(PI_HOST) "mkdir -p $(PI_PATH)"
 	scp $(APP_NAME)-arm64 $(PI_USER)@$(PI_HOST):$(PI_PATH)/$(APP_NAME)
-	scp config/config.toml $(PI_USER)@$(PI_HOST):$(PI_PATH)/
+	scp config.toml $(PI_USER)@$(PI_HOST):$(PI_PATH)/
 	ssh $(PI_USER)@$(PI_HOST) "chmod +x $(PI_PATH)/$(APP_NAME)"
 	@echo "Deployment complete. SSH into Pi and run: cd $(PI_PATH) && ./$(APP_NAME)"
 

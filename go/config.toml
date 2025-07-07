@@ -96,6 +96,32 @@ new-i2c-address = 0x2A
 i2c-bus = 0
 address = 0x68
 
+# Buffer sizes for channels and queues
+[buffers]
+frame_channel_size = 30      # Buffer size for frame channels
+encoded_channel_size = 20    # Buffer size for encoded video channels
+signal_channel_size = 1      # Buffer size for signal channels
+error_channel_size = 1       # Buffer size for error channels
+
+# Timeout and delay settings
+[timeouts]
+webrtc_startup_delay_ms = 2000      # Delay before starting cameras after WebRTC servers
+camera_startup_delay_ms = 1000      # Delay between starting cameras
+encoder_sleep_interval_ms = 10      # Sleep interval for encoder loop
+shutdown_timeout_seconds = 30       # Timeout for graceful shutdown
+http_shutdown_timeout_seconds = 5   # Timeout for HTTP server shutdown
+
+# Logging configuration
+[logging]
+frame_log_interval = 30             # Log every N frames (0 to disable)
+stats_log_interval_seconds = 60     # Interval for stats logging
+
+# Resource limits
+[limits]
+max_memory_usage_mb = 512           # Maximum memory usage before alert
+max_log_files = 20                  # Maximum number of log files to keep
+max_payload_size_mb = 2             # Maximum payload size for video frames
+
 # GStreamer debug configuration for memory leak detection
 [debug]
 enable_memory_monitoring = true
