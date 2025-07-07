@@ -25,12 +25,24 @@ type Config struct {
 
 // CameraConfig holds camera-specific settings
 type CameraConfig struct {
-	Device      string `toml:"device" json:"device"`
-	Width       int    `toml:"width" json:"width"`
-	Height      int    `toml:"height" json:"height"`
-	FPS         int    `toml:"fps" json:"fps"`
-	WebRTCPort  int    `toml:"webrtc_port" json:"webrtc_port"`
-	FlipMethod  string `toml:"flip_method" json:"flip_method"`
+	Device         string `toml:"device" json:"device"`
+	Width          int    `toml:"width" json:"width"`
+	Height         int    `toml:"height" json:"height"`
+	TargetWidth    int    `toml:"target-width" json:"target_width"`
+	TargetHeight   int    `toml:"target-height" json:"target_height"`
+	FPS            int    `toml:"fps" json:"fps"`
+	WebRTCPort     int    `toml:"webrtc_port" json:"webrtc_port"`
+	FlipMethod     string `toml:"flip_method" json:"flip_method"`
+	ScalingEnabled bool   `toml:"scaling_enabled" json:"scaling_enabled"`
+	Crop           CropConfig `toml:"crop" json:"crop"`
+}
+
+// CropConfig holds cropping settings
+type CropConfig struct {
+	X      int `toml:"x" json:"x"`
+	Y      int `toml:"y" json:"y"`
+	Width  int `toml:"width" json:"width"`
+	Height int `toml:"height" json:"height"`
 }
 
 // ServerConfig holds web server settings
@@ -104,20 +116,38 @@ func LoadConfig(configPath string) (*Config, error) {
 	// Set default values
 	config := &Config{
 		Camera1: CameraConfig{
-			Device:     "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10",
-			Width:      640,
-			Height:     480,
-			FPS:        30,
-			WebRTCPort: 5557,
-			FlipMethod: "vertical-flip",
+			Device:         "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10",
+			Width:          640,
+			Height:         480,
+			TargetWidth:    640,
+			TargetHeight:   480,
+			FPS:            30,
+			WebRTCPort:     5557,
+			FlipMethod:     "vertical-flip",
+			ScalingEnabled: false,
+			Crop: CropConfig{
+				X:      0,
+				Y:      0,
+				Width:  640,
+				Height: 480,
+			},
 		},
 		Camera2: CameraConfig{
-			Device:     "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10",
-			Width:      640,
-			Height:     480,
-			FPS:        30,
-			WebRTCPort: 5558,
-			FlipMethod: "vertical-flip",
+			Device:         "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10",
+			Width:          640,
+			Height:         480,
+			TargetWidth:    640,
+			TargetHeight:   480,
+			FPS:            30,
+			WebRTCPort:     5558,
+			FlipMethod:     "vertical-flip",
+			ScalingEnabled: false,
+			Crop: CropConfig{
+				X:      0,
+				Y:      0,
+				Width:  640,
+				Height: 480,
+			},
 		},
 		Server: ServerConfig{
 			WebPort: 8080,

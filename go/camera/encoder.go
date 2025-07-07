@@ -216,15 +216,30 @@ func (e *Encoder) GetEncodingInfo() map[string]interface{} {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// Use target dimensions if scaling is enabled, otherwise use source dimensions
+	width := e.cameraConfig.Width
+	height := e.cameraConfig.Height
+	
+	if e.cameraConfig.ScalingEnabled {
+		width = e.cameraConfig.TargetWidth
+		height = e.cameraConfig.TargetHeight
+		e.logger.Debug("Using target dimensions for encoder info",
+			zap.Int("source_width", e.cameraConfig.Width),
+			zap.Int("source_height", e.cameraConfig.Height),
+			zap.Int("target_width", width),
+			zap.Int("target_height", height))
+	}
+
 	info := map[string]interface{}{
 		"codec":             e.encodingConfig.Codec,
 		"bitrate":           e.encodingConfig.Bitrate,
 		"keyframe_interval": e.encodingConfig.KeyframeInterval,
 		"cpu_used":          e.encodingConfig.CPUUsed,
-		"width":             e.cameraConfig.Width,
-		"height":            e.cameraConfig.Height,
+		"width":             width,
+		"height":            height,
 		"fps":               e.cameraConfig.FPS,
 		"running":           e.isRunning,
+		"scaling_enabled":   e.cameraConfig.ScalingEnabled,
 	}
 
 	return info

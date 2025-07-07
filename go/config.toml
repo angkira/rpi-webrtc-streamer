@@ -43,32 +43,36 @@ codec = "h264"
 codec = "h264" # Codec: "vp8" or "h264"
 encoder-preset = "fast" # Encoder preset: "realtime", "good", "best"
 keyframe-interval = 30 # Keyframe interval in frames
-cpu-used = 8 # CPU usage setting for VP8 (higher = faster, lower quality)
+cpu-used = 4 # CPU usage setting for VP8 (lower = higher quality, slower)
 
 [encoding]
-codec = "vp8"
+codec = "h264"
 bitrate = 2000000
 keyframe_interval = 30
-cpu_used = 8
+cpu_used = 4
 
 [camera1]
 device = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"
-width = 640
-height = 480
+# Use proper 16:9 aspect ratio scaling to avoid deformation
+width = 1280
+height = 720
 target-width = 640
-target-height = 480
+target-height = 360
 fps = 30
 webrtc_port = 5557
 flip_method = "vertical-flip"
+# Enable scaling for 2:1 downscaling (maintains aspect ratio)
+scaling_enabled = true
 
 [camera1.crop]
 x = 0
 y = 0
-width = 640
-height = 480
+width = 1280
+height = 720
 
 [camera2]
 device = "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10"
+# Keep simple resolution for camera2
 width = 640
 height = 480
 target-width = 640
@@ -76,6 +80,8 @@ target-height = 480
 fps = 30
 webrtc_port = 5558
 flip_method = "vertical-flip"
+# No scaling needed for camera2
+scaling_enabled = false
 
 [camera2.crop]
 x = 0
@@ -106,7 +112,7 @@ error_channel_size = 1       # Buffer size for error channels
 # Timeout and delay settings
 [timeouts]
 webrtc_startup_delay_ms = 2000      # Delay before starting cameras after WebRTC servers
-camera_startup_delay_ms = 1000      # Delay between starting cameras
+camera_startup_delay_ms = 3000      # Increased delay between starting cameras to avoid conflicts
 encoder_sleep_interval_ms = 10      # Sleep interval for encoder loop
 shutdown_timeout_seconds = 30       # Timeout for graceful shutdown
 http_shutdown_timeout_seconds = 5   # Timeout for HTTP server shutdown

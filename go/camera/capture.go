@@ -94,15 +94,13 @@ func (c *Capture) gstreamerCaptureLoop() {
 	isH264 := strings.ToLower(c.videoConfig.Codec) == "h264"
 
 	if !isH264 {
-		// For VP8 (IVF), read and discard the 32-byte IVF header once.
-		header := make([]byte, 32)
-		if _, err := io.ReadFull(bufferedStdout, header); err != nil {
-			c.logger.Error("Failed to read IVF header", zap.Error(err))
-			return
-		}
+		// For VP8 without IVF headers, we'll read raw frame data
+		// No header to discard since we removed ivfparse
+		c.logger.Info("Reading raw VP8 frames without IVF headers")
 	}
 
 	var currentFrame []byte
+	frameCount := 0
 
 	for {
 		select {
@@ -176,55 +174,43 @@ func (c *Capture) gstreamerCaptureLoop() {
 
 			continue // skip VP8 path below
 		} else {
-			// ===== VP8 (IVF) PATH =====
-			// Each IVF frame: 4-byte little-endian size, 8-byte timestamp, followed by frame data.
-			sizeBuf := make([]byte, 4)
-			if _, err := io.ReadFull(bufferedStdout, sizeBuf); err != nil {
+			// ===== VP8 (RAW) PATH =====
+			// Read raw VP8 data in chunks since we don't have IVF frame headers
+			chunkSize := 4096 // Read in 4KB chunks
+			frameData := make([]byte, chunkSize)
+			
+			n, err := bufferedStdout.Read(frameData)
+			if err != nil {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					c.logger.Info("GStreamer stdout reached EOF, stopping capture loop.")
 				} else if c.ctx.Err() == nil {
-					c.logger.Error("Error reading IVF frame size", zap.Error(err))
+					c.logger.Error("Error reading VP8 frame data", zap.Error(err))
 				}
 				break
 			}
-
-			frameLength := binary.LittleEndian.Uint32(sizeBuf)
-			if frameLength == 0 {
-				// Skip timestamp even if length is zero to keep in sync
-				if _, err := io.CopyN(io.Discard, bufferedStdout, 8); err != nil {
-					c.logger.Error("Failed to discard IVF timestamp", zap.Error(err))
+			
+			if n > 0 {
+				// Trim to actual data size
+				actualFrameData := frameData[:n]
+				
+				// Add basic validation for VP8 frame
+				// Log frame info periodically for debugging
+				frameCount++
+				if frameCount%c.fullConfig.Logging.FrameLogInterval == 0 {
+					c.logger.Info("VP8 frame processed", 
+						zap.Int("frame_count", frameCount),
+						zap.Int("frame_size", len(actualFrameData)),
+						zap.String("first_bytes", fmt.Sprintf("%02x %02x %02x %02x", 
+							actualFrameData[0], actualFrameData[1], actualFrameData[2], actualFrameData[3])))
 				}
-				continue
-			}
-			maxPayloadSize := uint32(c.fullConfig.Limits.MaxPayloadSizeMB * 1024 * 1024)
-			if frameLength > maxPayloadSize {
-				c.logger.Error("IVF frame length is too large, stopping.", zap.Uint32("length", frameLength), zap.Uint32("max_size", maxPayloadSize))
-				break
-			}
-
-			// Discard 8-byte timestamp
-			if _, err := io.CopyN(io.Discard, bufferedStdout, 8); err != nil {
-				c.logger.Error("Failed to discard IVF timestamp", zap.Error(err))
-				break
-			}
-
-			frameData := make([]byte, frameLength)
-			if _, err := io.ReadFull(bufferedStdout, frameData); err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					c.logger.Warn("GStreamer stdout reached EOF while reading IVF frame data.")
-				} else if c.ctx.Err() == nil {
-					c.logger.Error("Error reading IVF frame data", zap.Error(err))
+				
+				select {
+				case c.frameChan <- actualFrameData:
+				case <-c.gstCtx.Done():
+					return
+				default:
+					c.logger.Warn("Dropping frame, channel is full.")
 				}
-				break
-			}
-
-			// For VP8, send raw frame data downstream
-			select {
-			case c.frameChan <- frameData:
-			case <-c.gstCtx.Done():
-				return
-			default:
-				c.logger.Warn("Dropping frame, channel is full.")
 			}
 		}
 	}
@@ -272,12 +258,6 @@ func (c *Capture) startGStreamerCapture() error {
 		zap.String("flip_method", c.config.FlipMethod),
 		zap.String("codec", c.videoConfig.Codec))
 
-	// Test pipeline syntax before running
-	if err := c.testGStreamerPipeline(pipeline); err != nil {
-		c.logger.Warn("Pipeline syntax test failed, but continuing anyway", zap.Error(err))
-		// Continue anyway as the test might fail due to missing plugins on the build system
-	}
-
 	// Start GStreamer process
 	if err := c.gstCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start GStreamer: %w", err)
@@ -306,7 +286,6 @@ func (c *Capture) buildGStreamerPipeline() string {
 	var pipeline strings.Builder
 
 	// 1. Source: libcamerasrc using the full device path (camera-name).
-	// The 'camera-id' property caused issues with this libcamerasrc version.
 	pipeline.WriteString(fmt.Sprintf(`libcamerasrc camera-name="%s"`, c.devicePath))
 
 	// 2. Add flip/rotation IMMEDIATELY after the camera source, before any format conversion
@@ -339,10 +318,13 @@ func (c *Capture) buildGStreamerPipeline() string {
 	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
 		c.config.Width, c.config.Height, c.config.FPS))
 
-	// 5. Add a queue for stability, placed after format conversion
+	// 5. Add scaling if enabled and dimensions differ
+	c.addScalingToPipeline(&pipeline)
+
+	// 6. Add a queue for stability, placed after format conversion and scaling
 	pipeline.WriteString(" ! queue")
 
-	// 6. Add encoding based on codec.
+	// 7. Add encoding based on codec.
 	c.logger.Info("Building GStreamer pipeline with codec", zap.String("codec", c.videoConfig.Codec))
 	switch c.videoConfig.Codec { // Use videoConfig here
 	case "h264":
@@ -374,8 +356,8 @@ func (c *Capture) buildGStreamerPipeline() string {
 	case "vp8":
 		pipeline.WriteString(fmt.Sprintf(` ! vp8enc deadline=1 target-bitrate=%d cpu-used=%d keyframe-max-dist=%d`,
 			c.videoConfig.Bitrate, c.videoConfig.CPUUsed, c.videoConfig.KeyframeInterval))
-		// Add ivfparse to frame the VP8 stream with IVF headers for easier parsing.
-		pipeline.WriteString(" ! ivfparse ! fdsink fd=1 sync=false")
+		// Output raw VP8 frames - remove ivfparse that was causing linking issues
+		pipeline.WriteString(" ! fdsink fd=1 sync=false")
 	default:
 		c.logger.Warn("Unsupported codec, falling back to VP8", zap.String("codec", c.videoConfig.Codec))
 		pipeline.WriteString(fmt.Sprintf(` ! vp8enc deadline=1 target-bitrate=%d cpu-used=%d keyframe-max-dist=%d`,
@@ -421,10 +403,13 @@ func (c *Capture) checkGStreamerPlugins() {
 		"videoconvert", 
 		"videoflip",
 		"videotransform",
+		"videoscale",
+		"videoconvertscale",
 		"x264enc",
 		"vp8enc",
 		"h264parse",
 		"ivfparse",
+		"queue",
 	}
 	
 	c.logger.Info("Checking GStreamer plugin availability")
@@ -670,7 +655,7 @@ func (c *Capture) getFlipPipelineElement(method string) (string, error) {
 		return "", fmt.Errorf("unsupported flip method: %s", method)
 	}
 	
-	// Try videoflip with video-direction property (newer interface)
+		// Try videoflip with video-direction property (newer interface)
 	if c.isGStreamerElementAvailable("videoflip") {
 		c.logger.Info("Using videoflip with video-direction property", zap.String("method", method))
 		switch method {
@@ -686,7 +671,7 @@ func (c *Capture) getFlipPipelineElement(method string) (string, error) {
 			return " ! videoflip video-direction=4", nil
 		}
 	}
-	
+
 	// Fallback: try videoflip with numeric method values as per GStreamer documentation
 	if c.isGStreamerElementAvailable("videoflip") {
 		c.logger.Info("Fallback: Using videoflip with numeric method", zap.String("method", method))
@@ -703,7 +688,7 @@ func (c *Capture) getFlipPipelineElement(method string) (string, error) {
 			return " ! videoflip method=4", nil
 		}
 	}
-	
+
 	// Try videotransform if available
 	if c.isGStreamerElementAvailable("videotransform") {
 		c.logger.Info("Using videotransform as alternative", zap.String("method", method))
@@ -724,23 +709,71 @@ func (c *Capture) getFlipPipelineElement(method string) (string, error) {
 	return "", fmt.Errorf("no supported flip element found for method: %s", method)
 }
 
-// testGStreamerPipeline tests if the pipeline syntax is valid
-func (c *Capture) testGStreamerPipeline(pipeline string) error {
-	// Use gst-launch-1.0 --dry-run to test pipeline syntax
-	args := []string{"--dry-run"}
-	args = append(args, strings.Fields(pipeline)...)
-	
-	cmd := exec.Command("gst-launch-1.0", args...)
-	output, err := cmd.CombinedOutput()
-	
-	if err != nil {
-		c.logger.Error("GStreamer pipeline syntax error", 
-			zap.String("pipeline", pipeline),
-			zap.String("error_output", string(output)),
-			zap.Error(err))
-		return fmt.Errorf("GStreamer pipeline syntax error: %w", err)
+// getAvailableScalingMethod returns the best available scaling method
+func (c *Capture) getAvailableScalingMethod() (string, string) {
+	// List of scaling methods in preference order
+	scalingMethods := []struct {
+		element   string
+		algorithm string
+		desc      string
+	}{
+		{"videoscale", "bilinear", "High-quality software scaling"},
+		{"videoconvertscale", "bilinear", "Combined conversion and scaling"},  
+		{"videoscale", "lanczos", "Higher quality but slower scaling"},
+		{"videoconvertscale", "nearest", "Fast but lower quality scaling"},
 	}
 	
-	c.logger.Debug("GStreamer pipeline syntax is valid")
-	return nil
+	for _, method := range scalingMethods {
+		if c.isGStreamerElementAvailable(method.element) {
+			c.logger.Info("Selected scaling method", 
+				zap.String("element", method.element),
+				zap.String("algorithm", method.algorithm),
+				zap.String("description", method.desc))
+			return method.element, method.algorithm
+		}
+	}
+	
+	c.logger.Warn("No scaling elements available")
+	return "", ""
+}
+
+// addScalingToPipeline adds video scaling to the pipeline if enabled
+func (c *Capture) addScalingToPipeline(pipeline *strings.Builder) {
+	if !c.config.ScalingEnabled {
+		return
+	}
+	
+	// Check if scaling is needed
+	if c.config.Width == c.config.TargetWidth && c.config.Height == c.config.TargetHeight {
+		c.logger.Info("Scaling enabled but source and target dimensions are the same, skipping scaling")
+		return
+	}
+	
+	c.logger.Info("Adding video scaling to pipeline", 
+		zap.Int("source_width", c.config.Width),
+		zap.Int("source_height", c.config.Height),
+		zap.Int("target_width", c.config.TargetWidth), 
+		zap.Int("target_height", c.config.TargetHeight),
+		zap.Float64("scale_ratio", float64(c.config.Width)/float64(c.config.TargetWidth)))
+	
+	// Get best available scaling method
+	element, algorithm := c.getAvailableScalingMethod()
+	if element == "" {
+		c.logger.Warn("No scaling elements available, scaling disabled")
+		return
+	}
+	
+	// Add scaling element with algorithm
+	pipeline.WriteString(fmt.Sprintf(" ! %s method=%s", element, algorithm))
+	
+	// Add caps filter for target dimensions
+	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d",
+		c.config.TargetWidth, c.config.TargetHeight))
+	
+	c.logger.Info("Video scaling added to pipeline", 
+		zap.String("method", element),
+		zap.String("algorithm", algorithm),
+		zap.String("result", fmt.Sprintf("%dx%d->%dx%d", 
+			c.config.Width, c.config.Height, 
+			c.config.TargetWidth, c.config.TargetHeight)))
 } 

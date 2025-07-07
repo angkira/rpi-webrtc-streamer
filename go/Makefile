@@ -26,8 +26,9 @@ GO_BINARY_ARM64 := $(GO_APP_NAME)-$(GOARCH)
 
 # --- Go Deployment Settings ---
 GO_DEPLOY_SCRIPT := deploy-go/deploy-go.sh
+GO_UPDATE_CONFIG_SCRIPT := deploy-go/update-config.sh
 
-.PHONY: all build build-docker build-local test clean deps lint run deploy logs get-logs help-go
+.PHONY: all build build-docker build-local test clean deps lint run deploy update-config logs get-logs help-go
 
 # --- Main Go Targets ---
 
@@ -94,6 +95,15 @@ deploy: build-docker
 	fi
 	bash $(GO_DEPLOY_SCRIPT)
 
+# Update only configuration and web assets on Raspberry Pi
+update-config:
+	@echo "Updating configuration and web assets on Raspberry Pi..."
+	@if [ ! -f "$(GO_UPDATE_CONFIG_SCRIPT)" ]; then \
+		echo "🔴 Error: Config update script not found at $(GO_UPDATE_CONFIG_SCRIPT)!"; \
+		exit 1; \
+	fi
+	bash $(GO_UPDATE_CONFIG_SCRIPT)
+
 # View logs from Go service on Pi
 logs:
 	@echo "Viewing logs from Go service on Pi..."
@@ -119,6 +129,7 @@ help-go:
 	@echo "  make test          - Run Go tests"
 	@echo "  make lint          - Lint the Go code"
 	@echo "  make deploy        - Deploy the Go service to the Raspberry Pi (uses Docker build)"
+	@echo "  make update-config - Update only configuration and web assets on the Pi (no build/deploy)"
 	@echo "  make logs          - View live logs from the Go service on the Pi"
 	@echo "  make get-logs      - Retrieve FFmpeg report logs from the Pi"
 	@echo "  make clean         - Clean Go build artifacts"
