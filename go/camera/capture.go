@@ -309,18 +309,9 @@ func (c *Capture) buildGStreamerPipeline() string {
 	// The 'camera-id' property caused issues with this libcamerasrc version.
 	pipeline.WriteString(fmt.Sprintf(`libcamerasrc camera-name="%s"`, c.devicePath))
 
-	// 2. Use videoconvert to handle the negotiation. It will accept the raw format
-	//    from the camera and convert it to a standard format that encoders can use.
-	pipeline.WriteString(" ! videoconvert")
-
-	// 3. Add a caps filter AFTER videoconvert to lock the format to a standard
-	//    one (like I420) that the rest of the pipeline is guaranteed to handle.
-	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
-		c.config.Width, c.config.Height, c.config.FPS))
-
-	// 4. Add flip/rotation BEFORE the queue and encoding for better performance
+	// 2. Add flip/rotation IMMEDIATELY after the camera source, before any format conversion
 	if c.config.FlipMethod != "" {
-		c.logger.Info("Adding video flip to pipeline", zap.String("method", c.config.FlipMethod))
+		c.logger.Info("Adding video flip immediately after camera source", zap.String("method", c.config.FlipMethod))
 		
 		// Get the appropriate flip pipeline element
 		flipElement, err := c.getFlipPipelineElement(c.config.FlipMethod)
@@ -339,7 +330,16 @@ func (c *Capture) buildGStreamerPipeline() string {
 		c.logger.Info("No flip method specified, skipping videoflip")
 	}
 
-	// 5. Add a queue for stability, placed after the flip operation
+	// 3. Use videoconvert to handle the negotiation. It will accept the raw format
+	//    from the camera and convert it to a standard format that encoders can use.
+	pipeline.WriteString(" ! videoconvert")
+
+	// 4. Add a caps filter AFTER videoconvert to lock the format to a standard
+	//    one (like I420) that the rest of the pipeline is guaranteed to handle.
+	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
+		c.config.Width, c.config.Height, c.config.FPS))
+
+	// 5. Add a queue for stability, placed after format conversion
 	pipeline.WriteString(" ! queue")
 
 	// 6. Add encoding based on codec.
@@ -670,37 +670,58 @@ func (c *Capture) getFlipPipelineElement(method string) (string, error) {
 		return "", fmt.Errorf("unsupported flip method: %s", method)
 	}
 	
-	// Try videoflip first
+	// Try videoflip with video-direction property (newer interface)
 	if c.isGStreamerElementAvailable("videoflip") {
+		c.logger.Info("Using videoflip with video-direction property", zap.String("method", method))
 		switch method {
 		case "rotate-180":
-			return " ! videoflip method=rotate-180", nil
+			return " ! videoflip video-direction=2", nil
 		case "rotate-90":
-			return " ! videoflip method=clockwise", nil
+			return " ! videoflip video-direction=1", nil
 		case "rotate-270":
-			return " ! videoflip method=counterclockwise", nil
+			return " ! videoflip video-direction=3", nil
 		case "vertical-flip":
-			return " ! videoflip method=vertical-flip", nil
+			return " ! videoflip video-direction=5", nil
 		case "horizontal-flip":
-			return " ! videoflip method=horizontal-flip", nil
+			return " ! videoflip video-direction=4", nil
 		}
 	}
 	
-	// Fallback to videotransform
+	// Fallback: try videoflip with numeric method values as per GStreamer documentation
+	if c.isGStreamerElementAvailable("videoflip") {
+		c.logger.Info("Fallback: Using videoflip with numeric method", zap.String("method", method))
+		switch method {
+		case "rotate-180":
+			return " ! videoflip method=2", nil
+		case "rotate-90":
+			return " ! videoflip method=1", nil
+		case "rotate-270":
+			return " ! videoflip method=3", nil
+		case "vertical-flip":
+			return " ! videoflip method=5", nil
+		case "horizontal-flip":
+			return " ! videoflip method=4", nil
+		}
+	}
+	
+	// Try videotransform if available
 	if c.isGStreamerElementAvailable("videotransform") {
+		c.logger.Info("Using videotransform as alternative", zap.String("method", method))
 		switch method {
 		case "vertical-flip":
-			return " ! videotransform flip-method=vertical-flip", nil
+			return " ! videotransform flip-v=true", nil
 		case "horizontal-flip":
-			return " ! videotransform flip-method=horizontal-flip", nil
+			return " ! videotransform flip-h=true", nil
 		case "rotate-180":
-			return " ! videotransform flip-method=rotate-180", nil
-		default:
-			return "", fmt.Errorf("flip method %s not supported by videotransform", method)
+			return " ! videotransform rotation=180", nil
+		case "rotate-90":
+			return " ! videotransform rotation=90", nil
+		case "rotate-270":
+			return " ! videotransform rotation=270", nil
 		}
 	}
 	
-	return "", fmt.Errorf("no suitable GStreamer element available for flip method: %s", method)
+	return "", fmt.Errorf("no supported flip element found for method: %s", method)
 }
 
 // testGStreamerPipeline tests if the pipeline syntax is valid
