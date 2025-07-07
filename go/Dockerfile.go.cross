@@ -1,0 +1,55 @@
+# Dockerfile for cross-compiling the Go application for ARM64
+
+# Use a specific Ubuntu version for stability
+FROM ubuntu:22.04
+
+# Set non-interactive frontend to avoid prompts during package installation
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Set Go version
+ARG GO_VERSION=1.21.6
+
+# --- Environment Setup ---
+ENV GO_VERSION=${GO_VERSION}
+ENV GOLANG_DOWNLOAD_URL=https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz
+ENV PATH="/usr/local/go/bin:/go/bin:${PATH}"
+ENV GO111MODULE=on
+
+# --- Install Dependencies ---
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends \
+  # Basic build tools
+  build-essential \
+  # Cross-compilation toolchain for ARM64
+  gcc-aarch64-linux-gnu \
+  g++-aarch64-linux-gnu \
+  # C libraries required by go4vl
+  pkg-config \
+  libv4l-dev \
+  # Utilities
+  ca-certificates \
+  curl \
+  git \
+  && rm -rf /var/lib/apt/lists/*
+
+# --- Install Go ---
+RUN curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz && \
+  tar -C /usr/local -xzf golang.tar.gz && \
+  rm golang.tar.gz
+
+# --- Set up Go environment ---
+RUN go install golang.org/x/tools/cmd/goimports@latest
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# --- Application Setup ---
+WORKDIR /app
+# Copy go.mod and go.sum to cache dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the rest of the application source code
+COPY . .
+
+# --- Build Command ---
+# This entrypoint will be used to run the build
+# ENTRYPOINT ["/usr/local/go/bin/go"] 

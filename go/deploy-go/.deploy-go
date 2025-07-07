@@ -1,0 +1,7 @@
+# Go service deployment configuration
+binary_name="pi-camera-streamer"
+remote_host="clamp"
+remote_base_dir="/home/angkira/opt"
+target_arch="arm64"
+service_name="pi-camera-streamer"
+run_after_deploy=true                         # Run binary after deployment 

@@ -1,0 +1,37 @@
+[Unit]
+Description=Pi Camera WebRTC Streamer (Go)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=angkira
+Group=angkira
+
+# Set working directory to where the binary is deployed
+WorkingDirectory=/home/angkira/opt/pi-camera-streamer
+
+# Path to the executable and arguments
+ExecStart=/home/angkira/opt/pi-camera-streamer/pi-camera-streamer -config /home/angkira/opt/pi-camera-streamer/config.toml -log-level info
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Fast graceful shutdown
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# Allow writing to the deployment directory if needed (e.g., for logs or configs)
+ReadWritePaths=/home/angkira/opt/pi-camera-streamer
+
+[Install]
+WantedBy=multi-user.target 
