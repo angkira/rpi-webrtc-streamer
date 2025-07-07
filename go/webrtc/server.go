@@ -260,7 +260,7 @@ func (s *Server) streamFramesToPeers() {
 				return
 			}
 			frameCount++
-			if frameCount%30 == 0 { // Log every 30 frames (~1 second)
+			if frameCount%s.config.Logging.FrameLogInterval == 0 { // Configurable logging interval
 				s.logger.Info("Distributing frame to peers",
 					zap.Int("frame_count", frameCount),
 					zap.Int("frame_size", len(frameData)),
@@ -318,7 +318,7 @@ func (s *Server) Stop() error {
 
 	// Stop HTTP server
 	if s.httpServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.config.Timeouts.HTTPShutdownTimeout)*time.Second)
 		defer cancel()
 		
 		if err := s.httpServer.Shutdown(ctx); err != nil {

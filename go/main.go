@@ -126,7 +126,7 @@ func main() {
 
 	// Graceful shutdown
 	logger.Info("Shutting down...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(app.config.Timeouts.ShutdownTimeout)*time.Second)
 	defer shutdownCancel()
 
 	if err := app.Stop(shutdownCtx); err != nil {
@@ -274,7 +274,7 @@ func (a *Application) startCamerasAsync() {
 	defer a.wg.Done()
 
 	// Wait a bit for WebRTC servers to be ready
-	time.Sleep(2 * time.Second)
+	time.Sleep(time.Duration(a.config.Timeouts.WebRTCStartupDelay) * time.Millisecond)
 
 	a.logger.Info("Starting cameras")
 	
@@ -285,7 +285,7 @@ func (a *Application) startCamerasAsync() {
 			a.logger.Info("Camera started", zap.String("camera", cameraID))
 		}
 		// Add a delay between starting cameras to avoid resource conflicts
-		time.Sleep(1 * time.Second)
+		time.Sleep(time.Duration(a.config.Timeouts.CameraStartupDelay) * time.Millisecond)
 	}
 }
 

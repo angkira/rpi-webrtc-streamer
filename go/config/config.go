@@ -17,6 +17,10 @@ type Config struct {
 	Encoding EncodingConfig `toml:"encoding" json:"encoding"`
 	Video    VideoConfig   `toml:"video" json:"video"`
 	WebRTC   WebRTCConfig  `toml:"webrtc" json:"webrtc"`
+	Buffers  BufferConfig  `toml:"buffers" json:"buffers"`
+	Timeouts TimeoutConfig `toml:"timeouts" json:"timeouts"`
+	Logging  LoggingConfig `toml:"logging" json:"logging"`
+	Limits   LimitConfig   `toml:"limits" json:"limits"`
 }
 
 // CameraConfig holds camera-specific settings
@@ -60,6 +64,36 @@ type WebRTCConfig struct {
 	MTU          int    `toml:"mtu" json:"mtu"`
 	Latency      int    `toml:"latency" json:"latency"`
 	Timeout      int    `toml:"timeout" json:"timeout"`
+}
+
+// BufferConfig holds buffer size settings for channels
+type BufferConfig struct {
+	FrameChannelSize    int `toml:"frame_channel_size" json:"frame_channel_size"`
+	EncodedChannelSize  int `toml:"encoded_channel_size" json:"encoded_channel_size"`
+	SignalChannelSize   int `toml:"signal_channel_size" json:"signal_channel_size"`
+	ErrorChannelSize    int `toml:"error_channel_size" json:"error_channel_size"`
+}
+
+// TimeoutConfig holds timeout and delay settings
+type TimeoutConfig struct {
+	WebRTCStartupDelay    int `toml:"webrtc_startup_delay_ms" json:"webrtc_startup_delay_ms"`
+	CameraStartupDelay    int `toml:"camera_startup_delay_ms" json:"camera_startup_delay_ms"`
+	EncoderSleepInterval  int `toml:"encoder_sleep_interval_ms" json:"encoder_sleep_interval_ms"`
+	ShutdownTimeout       int `toml:"shutdown_timeout_seconds" json:"shutdown_timeout_seconds"`
+	HTTPShutdownTimeout   int `toml:"http_shutdown_timeout_seconds" json:"http_shutdown_timeout_seconds"`
+}
+
+// LoggingConfig holds logging interval settings
+type LoggingConfig struct {
+	FrameLogInterval      int `toml:"frame_log_interval" json:"frame_log_interval"`
+	StatsLogInterval      int `toml:"stats_log_interval_seconds" json:"stats_log_interval_seconds"`
+}
+
+// LimitConfig holds resource limit settings
+type LimitConfig struct {
+	MaxMemoryUsageMB     int `toml:"max_memory_usage_mb" json:"max_memory_usage_mb"`
+	MaxLogFiles          int `toml:"max_log_files" json:"max_log_files"`
+	MaxPayloadSizeMB     int `toml:"max_payload_size_mb" json:"max_payload_size_mb"`
 }
 
 // LoadConfig loads configuration from a TOML file
@@ -108,6 +142,28 @@ func LoadConfig(configPath string) (*Config, error) {
 			KeyframeInterval: 30,
 			CPUUsed:          8,
 			Bitrate:          2000000,
+		},
+		Buffers: BufferConfig{
+			FrameChannelSize:    30,
+			EncodedChannelSize:  20,
+			SignalChannelSize:   1,
+			ErrorChannelSize:    1,
+		},
+		Timeouts: TimeoutConfig{
+			WebRTCStartupDelay:    2000,
+			CameraStartupDelay:    1000,
+			EncoderSleepInterval:  10,
+			ShutdownTimeout:        30,
+			HTTPShutdownTimeout:    5,
+		},
+		Logging: LoggingConfig{
+			FrameLogInterval:     30,
+			StatsLogInterval:     60,
+		},
+		Limits: LimitConfig{
+			MaxMemoryUsageMB:     512,
+			MaxLogFiles:          20,
+			MaxPayloadSizeMB:      2,
 		},
 	}
 

@@ -23,6 +23,7 @@ type Capture struct {
 	config         config.CameraConfig
 	encodingConfig config.EncodingConfig
 	videoConfig    config.VideoConfig // New: General video encoding configuration
+	fullConfig     *config.Config     // Full config for buffer sizes and timeouts
 	logger         *zap.Logger
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -48,14 +49,15 @@ type FrameData struct {
 }
 
 // NewCapture creates a new capture instance
-func NewCapture(devicePath string, cfg config.CameraConfig, encodingCfg config.EncodingConfig, videoCfg config.VideoConfig, logger *zap.Logger) (*Capture, error) {
+func NewCapture(devicePath string, cfg config.CameraConfig, encodingCfg config.EncodingConfig, videoCfg config.VideoConfig, fullConfig *config.Config, logger *zap.Logger) (*Capture, error) {
 	return &Capture{
 		devicePath:     devicePath,
 		config:         cfg,
 		encodingConfig: encodingCfg,
 		videoConfig:    videoCfg, // Assign new config
+		fullConfig:     fullConfig,
 		logger:         logger,
-		frameChan:      make(chan []byte, 30), // Increased buffer
+		frameChan:      make(chan []byte, fullConfig.Buffers.FrameChannelSize), // Configurable buffer
 	}, nil
 }
 
@@ -132,8 +134,9 @@ func (c *Capture) gstreamerCaptureLoop() {
 			if payloadLen == 0 {
 				continue
 			}
-			if payloadLen > 2*1024*1024 {
-				c.logger.Error("NAL payload length too large, stopping.", zap.Uint32("length", payloadLen))
+			maxPayloadSize := uint32(c.fullConfig.Limits.MaxPayloadSizeMB * 1024 * 1024)
+			if payloadLen > maxPayloadSize {
+				c.logger.Error("NAL payload length too large, stopping.", zap.Uint32("length", payloadLen), zap.Uint32("max_size", maxPayloadSize))
 				break
 			}
 
@@ -193,8 +196,9 @@ func (c *Capture) gstreamerCaptureLoop() {
 				}
 				continue
 			}
-			if frameLength > 2*1024*1024 {
-				c.logger.Error("IVF frame length is too large, stopping.", zap.Uint32("length", frameLength))
+			maxPayloadSize := uint32(c.fullConfig.Limits.MaxPayloadSizeMB * 1024 * 1024)
+			if frameLength > maxPayloadSize {
+				c.logger.Error("IVF frame length is too large, stopping.", zap.Uint32("length", frameLength), zap.Uint32("max_size", maxPayloadSize))
 				break
 			}
 
@@ -460,7 +464,7 @@ func (c *Capture) stopGStreamerCapture() error {
 
 	// Wait for the command to exit, with a timeout.
 	if c.gstCmd != nil && c.gstCmd.Process != nil {
-		errChan := make(chan error, 1)
+		errChan := make(chan error, c.fullConfig.Buffers.ErrorChannelSize)
 		go func() {
 			errChan <- c.gstCmd.Wait()
 		}()

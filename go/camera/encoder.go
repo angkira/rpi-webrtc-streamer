@@ -15,6 +15,7 @@ import (
 type Encoder struct {
 	cameraConfig   config.CameraConfig
 	encodingConfig config.EncodingConfig
+	fullConfig     *config.Config
 	logger         *zap.Logger
 	
 	// Encoding pipeline
@@ -29,12 +30,13 @@ type Encoder struct {
 }
 
 // NewEncoder creates a new H.264 encoder
-func NewEncoder(cameraConfig config.CameraConfig, encodingConfig config.EncodingConfig, logger *zap.Logger) (*Encoder, error) {
+func NewEncoder(cameraConfig config.CameraConfig, encodingConfig config.EncodingConfig, fullConfig *config.Config, logger *zap.Logger) (*Encoder, error) {
 	encoder := &Encoder{
 		cameraConfig:   cameraConfig,
 		encodingConfig: encodingConfig,
+		fullConfig:     fullConfig,
 		logger:         logger,
-		encodedChan:    make(chan []byte, 20), // Buffer encoded frames
+		encodedChan:    make(chan []byte, fullConfig.Buffers.EncodedChannelSize), // Configurable buffer
 	}
 
 	return encoder, nil
@@ -96,7 +98,7 @@ func (e *Encoder) encodingLoop() {
 		default:
 			// For now, just sleep - the actual frame processing will be handled
 			// by ProcessFrame() method when frames are sent from capture
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(time.Duration(e.fullConfig.Timeouts.EncoderSleepInterval) * time.Millisecond)
 		}
 	}
 }

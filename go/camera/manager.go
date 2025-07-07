@@ -57,14 +57,14 @@ func (m *Manager) InitializeCamera(cameraID string) error {
 	camera.logger.Info("Initializing camera", zap.String("device_path", camera.DevicePath))
 
 	// Initialize capture with the correct arguments.
-	capture, err := NewCapture(camera.DevicePath, camera.Config, m.config.Encoding, m.config.Video, camera.logger)
+	capture, err := NewCapture(camera.DevicePath, camera.Config, m.config.Encoding, m.config.Video, m.config, camera.logger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize capture for %s: %w", cameraID, err)
 	}
 	camera.Capture = capture
 
 	// Initialize encoder
-	encoder, err := NewEncoder(camera.Config, m.config.Encoding, camera.logger)
+	encoder, err := NewEncoder(camera.Config, m.config.Encoding, m.config, camera.logger)
 	if err != nil {
 		capture.Close() // Cleanup capture on encoder failure
 		return fmt.Errorf("failed to initialize encoder for %s: %w", cameraID, err)
@@ -124,7 +124,7 @@ func (m *Manager) connectCaptureToEncoder(camera *Camera) {
 		}
 		
 		frameCount++
-		if frameCount%30 == 0 { // Log every 30 frames (~1 second at 30fps)
+		if frameCount%m.config.Logging.FrameLogInterval == 0 { // Configurable logging interval
 			camera.logger.Info("Processing frame from capture", 
 				zap.Int("frame_count", frameCount),
 				zap.Int("frame_size", len(frameData)))
