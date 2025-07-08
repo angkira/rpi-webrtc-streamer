@@ -72,15 +72,14 @@ height = 1080
 
 [camera2]
 device = "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10"
-# Temporarily disable camera2 by using invalid dimensions
-width = 0
-height = 0
-target-width = 0
-target-height = 0
+# VGA resolution for stable dual-camera streaming
+width = 640
+height = 480
+target-width = 640
+target-height = 480
 fps = 30
 webrtc_port = 5558
 flip_method = "vertical-flip"
-# No scaling needed for camera2
 scaling_enabled = false
 
 [camera2.crop]
