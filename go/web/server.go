@@ -71,6 +71,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/cameras/stop", s.handlers.HandleAPIStopCameras)
 	mux.HandleFunc("/api/stats", s.handlers.HandleAPIStats)
 	
+	// Serve static files (like JavaScript)
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static"))))
+	
 	// Health check
 	mux.HandleFunc("/health", s.handlers.HandleHealth)
 
