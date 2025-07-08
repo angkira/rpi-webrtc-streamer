@@ -53,11 +53,11 @@ cpu_used = 4
 
 [camera1]
 device = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"
-# Use proper 16:9 aspect ratio scaling to avoid deformation
-width = 1280
-height = 720
-target-width = 640
-target-height = 360
+# Use FullHD resolution for camera1 
+width = 1920
+height = 1080
+target-width = 960
+target-height = 540
 fps = 30
 webrtc_port = 5557
 flip_method = "vertical-flip"
@@ -67,16 +67,16 @@ scaling_enabled = true
 [camera1.crop]
 x = 0
 y = 0
-width = 1280
-height = 720
+width = 1920
+height = 1080
 
 [camera2]
 device = "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10"
-# Keep simple resolution for camera2
-width = 640
-height = 480
-target-width = 640
-target-height = 480
+# Temporarily disable camera2 by using invalid dimensions
+width = 0
+height = 0
+target-width = 0
+target-height = 0
 fps = 30
 webrtc_port = 5558
 flip_method = "vertical-flip"
@@ -104,15 +104,15 @@ address = 0x68
 
 # Buffer sizes for channels and queues
 [buffers]
-frame_channel_size = 30      # Buffer size for frame channels
-encoded_channel_size = 20    # Buffer size for encoded video channels
-signal_channel_size = 1      # Buffer size for signal channels
-error_channel_size = 1       # Buffer size for error channels
+frame_channel_size = 20             # Reduced buffer size for FullHD memory management
+encoded_channel_size = 15           # Reduced buffer size to prevent memory buildup
+signal_channel_size = 1             # Buffer size for signal channels
+error_channel_size = 1              # Buffer size for error channels
 
 # Timeout and delay settings
 [timeouts]
 webrtc_startup_delay_ms = 2000      # Delay before starting cameras after WebRTC servers
-camera_startup_delay_ms = 3000      # Increased delay between starting cameras to avoid conflicts
+camera_startup_delay_ms = 5000      # Increased delay for FullHD hardware stabilization
 encoder_sleep_interval_ms = 10      # Sleep interval for encoder loop
 shutdown_timeout_seconds = 30       # Timeout for graceful shutdown
 http_shutdown_timeout_seconds = 5   # Timeout for HTTP server shutdown
@@ -122,15 +122,15 @@ http_shutdown_timeout_seconds = 5   # Timeout for HTTP server shutdown
 frame_log_interval = 30             # Log every N frames (0 to disable)
 stats_log_interval_seconds = 60     # Interval for stats logging
 
-# Resource limits
+# Resource limits - optimized for FullHD processing
 [limits]
-max_memory_usage_mb = 512           # Maximum memory usage before alert
-max_log_files = 20                  # Maximum number of log files to keep
-max_payload_size_mb = 2             # Maximum payload size for video frames
+max_memory_usage_mb = 384           # Reduced from 512MB to prevent system memory exhaustion
+max_log_files = 15                  # Reduced log file count to save disk space
+max_payload_size_mb = 3             # Increased for FullHD frames but with limit
 
 # GStreamer debug configuration for memory leak detection
 [debug]
 enable_memory_monitoring = true
-memory_check_interval_seconds = 60
-max_memory_usage_mb = 512  # Alert if memory exceeds this limit
-gst_debug_level = 2  # Reduced from default to minimize overhead 
+memory_check_interval_seconds = 30  # More frequent memory checks for FullHD
+max_memory_usage_mb = 384           # Match the limits setting
+gst_debug_level = 1                 # Further reduced to minimize memory overhead for FullHD 

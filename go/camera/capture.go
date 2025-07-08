@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,6 +39,72 @@ type Capture struct {
 	frameChan chan []byte
 	isRunning bool
 	mu        sync.RWMutex
+	
+	// Memory monitoring
+	memoryMonitor    *MemoryMonitor
+	isFullHD         bool
+	frameDropCount   int64
+	lastMemoryCheck  time.Time
+}
+
+// MemoryMonitor tracks memory usage and implements degradation strategies
+type MemoryMonitor struct {
+	logger           *zap.Logger
+	maxMemoryMB      int
+	warningThresholdMB int
+	criticalThresholdMB int
+	checkInterval    time.Duration
+	degradationActive bool
+	mu               sync.RWMutex
+}
+
+// NewMemoryMonitor creates a new memory monitor
+func NewMemoryMonitor(maxMemoryMB int, logger *zap.Logger) *MemoryMonitor {
+	return &MemoryMonitor{
+		logger:              logger,
+		maxMemoryMB:         maxMemoryMB,
+		warningThresholdMB:  int(float64(maxMemoryMB) * 0.7),  // 70% warning
+		criticalThresholdMB: int(float64(maxMemoryMB) * 0.85), // 85% critical
+		checkInterval:       time.Second * 5,
+	}
+}
+
+// GetMemoryUsageMB returns current memory usage in MB
+func (mm *MemoryMonitor) GetMemoryUsageMB() (int, error) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	
+	// Convert bytes to MB
+	allocMB := int(m.Alloc / 1024 / 1024)
+	return allocMB, nil
+}
+
+// CheckMemoryPressure checks current memory usage and returns degradation level
+func (mm *MemoryMonitor) CheckMemoryPressure() (degradationLevel int, shouldDegrade bool) {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	
+	currentMB, err := mm.GetMemoryUsageMB()
+	if err != nil {
+		mm.logger.Error("Failed to get memory usage", zap.Error(err))
+		return 0, false
+	}
+	
+	if currentMB >= mm.criticalThresholdMB {
+		mm.logger.Warn("Critical memory pressure detected", 
+			zap.Int("current_mb", currentMB),
+			zap.Int("critical_threshold_mb", mm.criticalThresholdMB))
+		return 3, true // Critical - aggressive degradation
+	} else if currentMB >= mm.warningThresholdMB {
+		mm.logger.Info("Memory pressure warning", 
+			zap.Int("current_mb", currentMB),
+			zap.Int("warning_threshold_mb", mm.warningThresholdMB))
+		return 2, true // Warning - moderate degradation
+	} else if currentMB >= int(float64(mm.maxMemoryMB)*0.5) {
+		return 1, false // Light pressure - monitoring only
+	}
+	
+	return 0, false // Normal
 }
 
 // FrameData represents a single video frame
@@ -50,7 +117,9 @@ type FrameData struct {
 
 // NewCapture creates a new capture instance
 func NewCapture(devicePath string, cfg config.CameraConfig, encodingCfg config.EncodingConfig, videoCfg config.VideoConfig, fullConfig *config.Config, logger *zap.Logger) (*Capture, error) {
-	return &Capture{
+	isFullHD := cfg.Width >= 1920 || cfg.Height >= 1080
+	
+	capture := &Capture{
 		devicePath:     devicePath,
 		config:         cfg,
 		encodingConfig: encodingCfg,
@@ -58,7 +127,18 @@ func NewCapture(devicePath string, cfg config.CameraConfig, encodingCfg config.E
 		fullConfig:     fullConfig,
 		logger:         logger,
 		frameChan:      make(chan []byte, fullConfig.Buffers.FrameChannelSize), // Configurable buffer
-	}, nil
+		isFullHD:       isFullHD,
+		memoryMonitor:  NewMemoryMonitor(fullConfig.Limits.MaxMemoryUsageMB, logger),
+	}
+	
+	if isFullHD {
+		logger.Info("FullHD capture initialized with memory monitoring", 
+			zap.Int("width", cfg.Width),
+			zap.Int("height", cfg.Height),
+			zap.Int("max_memory_mb", fullConfig.Limits.MaxMemoryUsageMB))
+	}
+	
+	return capture, nil
 }
 
 // Start begins video capture using GStreamer
@@ -78,7 +158,8 @@ func (c *Capture) Start() error {
 
 // gstreamerCaptureLoop reads frames from GStreamer's stdout pipe
 func (c *Capture) gstreamerCaptureLoop() {
-	c.logger.Info("GStreamer capture loop started")
+	c.logger.Info("GStreamer capture loop started with memory monitoring",
+		zap.Bool("is_fullhd", c.isFullHD))
 	defer func() {
 		c.mu.Lock()
 		c.isRunning = false
@@ -101,6 +182,7 @@ func (c *Capture) gstreamerCaptureLoop() {
 
 	var currentFrame []byte
 	frameCount := 0
+	memoryCheckCounter := 0
 
 	for {
 		select {
@@ -109,12 +191,47 @@ func (c *Capture) gstreamerCaptureLoop() {
 		default:
 		}
 
+		// Memory monitoring for FullHD processing
+		if c.isFullHD {
+			memoryCheckCounter++
+			// Check memory every 10 frames for FullHD to avoid overhead
+			if memoryCheckCounter%10 == 0 || time.Since(c.lastMemoryCheck) > time.Second*5 {
+				c.lastMemoryCheck = time.Now()
+				degradationLevel, shouldDegrade := c.memoryMonitor.CheckMemoryPressure()
+				
+				if shouldDegrade {
+					switch degradationLevel {
+					case 3: // Critical - drop every other frame
+						if frameCount%2 == 0 {
+							c.frameDropCount++
+							if frameCount%60 == 0 { // Log every 2 seconds at 30fps
+								c.logger.Warn("Critical memory pressure - dropping frames", 
+									zap.Int64("dropped_frames", c.frameDropCount),
+									zap.Int("degradation_level", degradationLevel))
+							}
+							continue // Skip this frame
+						}
+					case 2: // Warning - drop every 3rd frame
+						if frameCount%3 == 0 {
+							c.frameDropCount++
+							continue // Skip this frame
+						}
+					}
+				}
+			}
+		}
+
 		if isH264 {
-			// ===== H.264 (AVC) PATH =====
+			// ===== H.264 (AVC) PATH with Memory Management =====
 
 			// Helper buffer that aggregates NAL units belonging to the same access unit (frame)
 			if currentFrame == nil {
-				currentFrame = make([]byte, 0, 4096)
+				// Allocate with memory-aware size
+				initialSize := 4096
+				if c.isFullHD {
+					initialSize = 8192 // Larger initial buffer for FullHD
+				}
+				currentFrame = make([]byte, 0, initialSize)
 			}
 
 			lenBuf := make([]byte, 4)
@@ -132,8 +249,22 @@ func (c *Capture) gstreamerCaptureLoop() {
 			if payloadLen == 0 {
 				continue
 			}
+			
+			// Enhanced payload size validation for FullHD
 			maxPayloadSize := uint32(c.fullConfig.Limits.MaxPayloadSizeMB * 1024 * 1024)
-			if payloadLen > maxPayloadSize {
+			if c.isFullHD && payloadLen > maxPayloadSize {
+				c.logger.Error("FullHD NAL payload length too large, dropping frame", 
+					zap.Uint32("length", payloadLen), 
+					zap.Uint32("max_size", maxPayloadSize))
+				// Skip this frame but continue processing
+				skipBuf := make([]byte, payloadLen)
+				if _, err := io.ReadFull(bufferedStdout, skipBuf); err != nil {
+					c.logger.Error("Error skipping oversized payload", zap.Error(err))
+					break
+				}
+				c.frameDropCount++
+				continue
+			} else if payloadLen > maxPayloadSize {
 				c.logger.Error("NAL payload length too large, stopping.", zap.Uint32("length", payloadLen), zap.Uint32("max_size", maxPayloadSize))
 				break
 			}
@@ -153,13 +284,10 @@ func (c *Capture) gstreamerCaptureLoop() {
 
 			// If this NAL is an AUD and we already have data accumulated, emit the previous frame first
 			if isAccessUnitDelimiter(annexBNAL) && len(currentFrame) > 0 {
-				select {
-				case c.frameChan <- currentFrame:
-				case <-c.gstCtx.Done():
-					return
-				default:
-					c.logger.Warn("Dropping frame, channel is full.")
-				}
+				// Send frame with memory-aware channel handling
+				c.sendFrameWithMemoryManagement(currentFrame, frameCount)
+				frameCount++
+				
 				// Start a new frame buffer with the AUD NAL we just read
 				currentFrame = append(make([]byte, 0, len(annexBNAL)+1024), annexBNAL...)
 				continue
@@ -168,15 +296,14 @@ func (c *Capture) gstreamerCaptureLoop() {
 			// Otherwise, append the NAL to the current frame buffer
 			currentFrame = append(currentFrame, annexBNAL...)
 
-			// Simple heuristic: if the NAL type is a slice (1–5) with the end_of_slice_flag set, we can also
-			// choose to emit the frame here. However, using AUD as delimiter is sufficient since x264enc
-			// inserts one before every access unit when aud=true.
-
 			continue // skip VP8 path below
 		} else {
-			// ===== VP8 (RAW) PATH =====
+			// ===== VP8 (RAW) PATH with Memory Management =====
 			// Read raw VP8 data in chunks since we don't have IVF frame headers
 			chunkSize := 4096 // Read in 4KB chunks
+			if c.isFullHD {
+				chunkSize = 8192 // Larger chunks for FullHD
+			}
 			frameData := make([]byte, chunkSize)
 			
 			n, err := bufferedStdout.Read(frameData)
@@ -193,23 +320,20 @@ func (c *Capture) gstreamerCaptureLoop() {
 				// Trim to actual data size
 				actualFrameData := frameData[:n]
 				
-				// Add basic validation for VP8 frame
-				// Log frame info periodically for debugging
+				// Send frame with memory management
+				c.sendFrameWithMemoryManagement(actualFrameData, frameCount)
 				frameCount++
+				
+				// Log frame info periodically for debugging
 				if frameCount%c.fullConfig.Logging.FrameLogInterval == 0 {
-					c.logger.Info("VP8 frame processed", 
+					currentMB, _ := c.memoryMonitor.GetMemoryUsageMB()
+					c.logger.Info("VP8 frame processed with memory monitoring", 
 						zap.Int("frame_count", frameCount),
 						zap.Int("frame_size", len(actualFrameData)),
+						zap.Int64("dropped_frames", c.frameDropCount),
+						zap.Int("memory_mb", currentMB),
 						zap.String("first_bytes", fmt.Sprintf("%02x %02x %02x %02x", 
 							actualFrameData[0], actualFrameData[1], actualFrameData[2], actualFrameData[3])))
-				}
-				
-				select {
-				case c.frameChan <- actualFrameData:
-				case <-c.gstCtx.Done():
-					return
-				default:
-					c.logger.Warn("Dropping frame, channel is full.")
 				}
 			}
 		}
@@ -217,10 +341,56 @@ func (c *Capture) gstreamerCaptureLoop() {
 
 	// Flush any pending H.264 frame before exiting the loop
 	if isH264 && len(currentFrame) > 0 {
+		c.sendFrameWithMemoryManagement(currentFrame, frameCount)
+	}
+	
+	// Log final statistics
+	if c.frameDropCount > 0 {
+		c.logger.Info("Capture loop finished with frame drops", 
+			zap.Int64("total_dropped_frames", c.frameDropCount),
+			zap.Bool("is_fullhd", c.isFullHD))
+	}
+}
+
+// sendFrameWithMemoryManagement sends frames to the channel with memory pressure awareness
+func (c *Capture) sendFrameWithMemoryManagement(frameData []byte, frameCount int) {
+	select {
+	case c.frameChan <- frameData:
+		// Frame sent successfully
+	case <-c.gstCtx.Done():
+		return
+	default:
+		// Channel is full - apply memory-aware dropping
+		if c.isFullHD {
+			degradationLevel, _ := c.memoryMonitor.CheckMemoryPressure()
+			if degradationLevel >= 2 {
+				// Under memory pressure - drop this frame
+				c.frameDropCount++
+				if frameCount%30 == 0 { // Log every second at 30fps
+					c.logger.Warn("Dropping frame due to full channel and memory pressure",
+						zap.Int("degradation_level", degradationLevel),
+						zap.Int64("total_dropped", c.frameDropCount))
+				}
+				return
+			}
+		}
+		
+		// Try to send with a short timeout
+		timeout := time.Millisecond * 10
+		if c.isFullHD {
+			timeout = time.Millisecond * 5 // Shorter timeout for FullHD
+		}
+		
 		select {
-		case c.frameChan <- currentFrame:
-		default:
-			c.logger.Warn("Dropping final frame, channel is full.")
+		case c.frameChan <- frameData:
+			// Frame sent successfully after brief wait
+		case <-time.After(timeout):
+			c.frameDropCount++
+			c.logger.Warn("Dropping frame due to channel timeout", 
+				zap.Bool("is_fullhd", c.isFullHD),
+				zap.Duration("timeout", timeout))
+		case <-c.gstCtx.Done():
+			return
 		}
 	}
 }
@@ -287,8 +457,30 @@ func (c *Capture) buildGStreamerPipeline() string {
 
 	// 1. Source: libcamerasrc using the full device path (camera-name).
 	pipeline.WriteString(fmt.Sprintf(`libcamerasrc camera-name="%s"`, c.devicePath))
+	
+	// Add memory-aware controls for FullHD resolution
+	isFullHD := c.config.Width >= 1920 || c.config.Height >= 1080
+	if isFullHD {
+		c.logger.Info("Applying FullHD memory optimizations", 
+			zap.Int("width", c.config.Width), 
+			zap.Int("height", c.config.Height))
+		// Note: libcamerasrc doesn't support buffer-count/queue-size properties
+		// Memory management will be handled through queue elements instead
+	}
 
-	// 2. Add flip/rotation IMMEDIATELY after the camera source, before any format conversion
+	// 2. Add explicit caps filter immediately after libcamerasrc for better negotiation
+	// This helps prevent caps negotiation failures by being explicit about what we want
+	if isFullHD {
+		// For FullHD, be explicit about the format to ensure proper negotiation
+		pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1", 
+			c.config.Width, c.config.Height, c.config.FPS))
+		c.logger.Info("Added explicit caps filter for FullHD", 
+			zap.Int("width", c.config.Width), 
+			zap.Int("height", c.config.Height),
+			zap.Int("fps", c.config.FPS))
+	}
+
+	// 3. Add flip/rotation IMMEDIATELY after the camera source, before any format conversion
 	if c.config.FlipMethod != "" {
 		c.logger.Info("Adding video flip immediately after camera source", zap.String("method", c.config.FlipMethod))
 		
@@ -309,22 +501,42 @@ func (c *Capture) buildGStreamerPipeline() string {
 		c.logger.Info("No flip method specified, skipping videoflip")
 	}
 
-	// 3. Use videoconvert to handle the negotiation. It will accept the raw format
+	// 4. Add memory-constrained queue immediately after flip for FullHD
+	if isFullHD {
+		pipeline.WriteString(" ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream")
+		c.logger.Info("Added FullHD memory-constrained queue after flip")
+	}
+
+	// 5. Use videoconvert to handle the negotiation. It will accept the raw format
 	//    from the camera and convert it to a standard format that encoders can use.
 	pipeline.WriteString(" ! videoconvert")
 
-	// 4. Add a caps filter AFTER videoconvert to lock the format to a standard
+	// 6. Add a caps filter AFTER videoconvert to lock the format to a standard
 	//    one (like I420) that the rest of the pipeline is guaranteed to handle.
-	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
-		c.config.Width, c.config.Height, c.config.FPS))
+	if isFullHD {
+		// For FullHD, explicitly specify I420 format for consistent processing
+		pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
+			c.config.Width, c.config.Height, c.config.FPS))
+	} else {
+		// For lower resolutions, use the original approach
+		pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1",
+			c.config.Width, c.config.Height, c.config.FPS))
+	}
 
-	// 5. Add scaling if enabled and dimensions differ
-	c.addScalingToPipeline(&pipeline)
+	// 7. Add scaling if enabled and dimensions differ - with optimized settings for FullHD
+	c.addOptimizedScalingToPipeline(&pipeline, isFullHD)
 
-	// 6. Add a queue for stability, placed after format conversion and scaling
-	pipeline.WriteString(" ! queue")
+	// 8. Add a memory-constrained queue for stability, placed after format conversion and scaling
+	if isFullHD {
+		// Tighter memory control for FullHD processing
+		pipeline.WriteString(" ! queue max-size-buffers=3 max-size-time=100000000 max-size-bytes=0 leaky=downstream")
+		c.logger.Info("Added FullHD processing queue with tight memory constraints")
+	} else {
+		// Standard queue for lower resolutions
+		pipeline.WriteString(" ! queue")
+	}
 
-	// 7. Add encoding based on codec.
+	// 9. Add encoding based on codec.
 	c.logger.Info("Building GStreamer pipeline with codec", zap.String("codec", c.videoConfig.Codec))
 	switch c.videoConfig.Codec { // Use videoConfig here
 	case "h264":
@@ -347,15 +559,30 @@ func (c *Capture) buildGStreamerPipeline() string {
 		case "openh264enc":
 			pipeline.WriteString(fmt.Sprintf(` ! openh264enc bitrate=%d`, c.videoConfig.Bitrate)) // Use videoConfig.Bitrate
 		case "x264enc":
-			// x264enc bitrate is in kbit/s
-			pipeline.WriteString(fmt.Sprintf(` ! x264enc speed-preset=%s tune=zerolatency aud=true bitrate=%d key-int-max=%d`,
-				c.videoConfig.EncoderPreset, c.videoConfig.Bitrate/1000, c.videoConfig.KeyframeInterval)) // aud=true inserts Access-Unit Delimiters
+			// x264enc bitrate is in kbit/s - with FullHD-optimized settings
+			if isFullHD {
+				// Optimized x264 settings for FullHD processing
+				pipeline.WriteString(fmt.Sprintf(` ! x264enc speed-preset=ultrafast tune=zerolatency threads=2 sync-lookahead=0 rc-lookahead=0 aud=true bitrate=%d key-int-max=%d`,
+					c.videoConfig.Bitrate/1000, c.videoConfig.KeyframeInterval))
+				c.logger.Info("Applied FullHD-optimized x264 encoder settings")
+			} else {
+				// Standard settings for lower resolutions
+				pipeline.WriteString(fmt.Sprintf(` ! x264enc speed-preset=%s tune=zerolatency aud=true bitrate=%d key-int-max=%d`,
+					c.videoConfig.EncoderPreset, c.videoConfig.Bitrate/1000, c.videoConfig.KeyframeInterval))
+			}
 		}
 		pipeline.WriteString(" ! h264parse config-interval=1 ! video/x-h264,stream-format=avc,alignment=au ! fdsink fd=1 sync=false")
 
 	case "vp8":
-		pipeline.WriteString(fmt.Sprintf(` ! vp8enc deadline=1 target-bitrate=%d cpu-used=%d keyframe-max-dist=%d`,
-			c.videoConfig.Bitrate, c.videoConfig.CPUUsed, c.videoConfig.KeyframeInterval))
+		// VP8 with FullHD optimizations
+		if isFullHD {
+			pipeline.WriteString(fmt.Sprintf(` ! vp8enc deadline=1 target-bitrate=%d cpu-used=%d keyframe-max-dist=%d threads=2`,
+				c.videoConfig.Bitrate, c.videoConfig.CPUUsed+2, c.videoConfig.KeyframeInterval)) // Higher cpu-used for FullHD
+			c.logger.Info("Applied FullHD-optimized VP8 encoder settings")
+		} else {
+			pipeline.WriteString(fmt.Sprintf(` ! vp8enc deadline=1 target-bitrate=%d cpu-used=%d keyframe-max-dist=%d`,
+				c.videoConfig.Bitrate, c.videoConfig.CPUUsed, c.videoConfig.KeyframeInterval))
+		}
 		// Output raw VP8 frames - remove ivfparse that was causing linking issues
 		pipeline.WriteString(" ! fdsink fd=1 sync=false")
 	default:
@@ -709,36 +936,8 @@ func (c *Capture) getFlipPipelineElement(method string) (string, error) {
 	return "", fmt.Errorf("no supported flip element found for method: %s", method)
 }
 
-// getAvailableScalingMethod returns the best available scaling method
-func (c *Capture) getAvailableScalingMethod() (string, string) {
-	// List of scaling methods in preference order
-	scalingMethods := []struct {
-		element   string
-		algorithm string
-		desc      string
-	}{
-		{"videoscale", "bilinear", "High-quality software scaling"},
-		{"videoconvertscale", "bilinear", "Combined conversion and scaling"},  
-		{"videoscale", "lanczos", "Higher quality but slower scaling"},
-		{"videoconvertscale", "nearest", "Fast but lower quality scaling"},
-	}
-	
-	for _, method := range scalingMethods {
-		if c.isGStreamerElementAvailable(method.element) {
-			c.logger.Info("Selected scaling method", 
-				zap.String("element", method.element),
-				zap.String("algorithm", method.algorithm),
-				zap.String("description", method.desc))
-			return method.element, method.algorithm
-		}
-	}
-	
-	c.logger.Warn("No scaling elements available")
-	return "", ""
-}
-
-// addScalingToPipeline adds video scaling to the pipeline if enabled
-func (c *Capture) addScalingToPipeline(pipeline *strings.Builder) {
+// addOptimizedScalingToPipeline adds memory-optimized video scaling to the pipeline
+func (c *Capture) addOptimizedScalingToPipeline(pipeline *strings.Builder, isFullHD bool) {
 	if !c.config.ScalingEnabled {
 		return
 	}
@@ -749,31 +948,89 @@ func (c *Capture) addScalingToPipeline(pipeline *strings.Builder) {
 		return
 	}
 	
-	c.logger.Info("Adding video scaling to pipeline", 
+	c.logger.Info("Adding optimized video scaling to pipeline", 
 		zap.Int("source_width", c.config.Width),
 		zap.Int("source_height", c.config.Height),
 		zap.Int("target_width", c.config.TargetWidth), 
 		zap.Int("target_height", c.config.TargetHeight),
-		zap.Float64("scale_ratio", float64(c.config.Width)/float64(c.config.TargetWidth)))
+		zap.Float64("scale_ratio", float64(c.config.Width)/float64(c.config.TargetWidth)),
+		zap.Bool("is_fullhd", isFullHD))
 	
-	// Get best available scaling method
-	element, algorithm := c.getAvailableScalingMethod()
+	// Get best available scaling method with FullHD considerations
+	element, algorithm := c.getOptimizedScalingMethod(isFullHD)
 	if element == "" {
 		c.logger.Warn("No scaling elements available, scaling disabled")
 		return
 	}
 	
-	// Add scaling element with algorithm
-	pipeline.WriteString(fmt.Sprintf(" ! %s method=%s", element, algorithm))
+	// Add scaling element with algorithm and memory optimizations
+	if isFullHD {
+		// For FullHD, use faster algorithms and add memory constraints
+		pipeline.WriteString(fmt.Sprintf(" ! %s method=%s add-borders=false", element, algorithm))
+	} else {
+		pipeline.WriteString(fmt.Sprintf(" ! %s method=%s", element, algorithm))
+	}
 	
 	// Add caps filter for target dimensions
 	pipeline.WriteString(fmt.Sprintf(" ! video/x-raw,format=I420,width=%d,height=%d",
 		c.config.TargetWidth, c.config.TargetHeight))
 	
-	c.logger.Info("Video scaling added to pipeline", 
+	c.logger.Info("Optimized video scaling added to pipeline", 
 		zap.String("method", element),
 		zap.String("algorithm", algorithm),
 		zap.String("result", fmt.Sprintf("%dx%d->%dx%d", 
 			c.config.Width, c.config.Height, 
-			c.config.TargetWidth, c.config.TargetHeight)))
+			c.config.TargetWidth, c.config.TargetHeight)),
+		zap.Bool("fullhd_optimized", isFullHD))
+}
+
+// getOptimizedScalingMethod returns the best available scaling method with FullHD optimizations
+func (c *Capture) getOptimizedScalingMethod(isFullHD bool) (string, string) {
+	if isFullHD {
+		// For FullHD, prioritize speed over quality
+		speedOptimizedMethods := []struct {
+			element   string
+			algorithm string
+			desc      string
+		}{
+			{"videoscale", "nearest-neighbour", "Fast nearest-neighbor for FullHD (2:1 scaling)"},
+			{"videoscale", "bilinear", "Fast bilinear for FullHD"},
+			{"videoconvertscale", "nearest-neighbour", "Fast combined conversion and scaling"},
+		}
+		
+		for _, method := range speedOptimizedMethods {
+			if c.isGStreamerElementAvailable(method.element) {
+				c.logger.Info("Selected FullHD-optimized scaling method", 
+					zap.String("element", method.element),
+					zap.String("algorithm", method.algorithm),
+					zap.String("description", method.desc))
+				return method.element, method.algorithm
+			}
+		}
+	} else {
+		// For lower resolutions, prioritize quality
+		qualityMethods := []struct {
+			element   string
+			algorithm string
+			desc      string
+		}{
+			{"videoscale", "bilinear", "High-quality software scaling"},
+			{"videoconvertscale", "bilinear", "Combined conversion and scaling"},  
+			{"videoscale", "lanczos", "Higher quality but slower scaling"},
+			{"videoconvertscale", "nearest-neighbour", "Fast but lower quality scaling"},
+		}
+		
+		for _, method := range qualityMethods {
+			if c.isGStreamerElementAvailable(method.element) {
+				c.logger.Info("Selected quality-optimized scaling method", 
+					zap.String("element", method.element),
+					zap.String("algorithm", method.algorithm),
+					zap.String("description", method.desc))
+				return method.element, method.algorithm
+			}
+		}
+	}
+	
+	c.logger.Warn("No scaling elements available")
+	return "", ""
 } 

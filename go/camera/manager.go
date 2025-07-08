@@ -2,6 +2,8 @@ package camera
 
 import (
 	"fmt"
+	"sync"
+	"time"
 	"pi-camera-streamer/config"
 	"go.uber.org/zap"
 )
@@ -11,6 +13,10 @@ type Manager struct {
 	config *config.Config
 	logger *zap.Logger
 	cameras map[string]*Camera
+	// Resource isolation
+	initMutex       sync.Mutex // Prevents concurrent camera initialization
+	resourceLocks   map[string]*sync.Mutex // Per-camera resource locks
+	lastInitTime    time.Time // Track timing between camera initializations
 }
 
 // Camera represents a single camera instance
@@ -22,92 +28,195 @@ type Camera struct {
 	Encoder    *Encoder
 	logger     *zap.Logger
 	isRunning  bool
+	// Resource management
+	resourceLock *sync.Mutex
+	initTime     time.Time
 }
 
 // NewManager creates a new camera manager
 func NewManager(cfg *config.Config, logger *zap.Logger) *Manager {
 	m := &Manager{
-		config:  cfg,
-		logger:  logger,
-		cameras: make(map[string]*Camera),
+		config:        cfg,
+		logger:        logger,
+		cameras:       make(map[string]*Camera),
+		resourceLocks: make(map[string]*sync.Mutex),
 	}
+	
+	// Create resource locks for each camera
+	m.resourceLocks["camera1"] = &sync.Mutex{}
+	m.resourceLocks["camera2"] = &sync.Mutex{}
+	
 	// Create camera instances from config
 	m.cameras["camera1"] = &Camera{
-		ID:         "camera1",
-		DevicePath: m.config.Camera1.Device,
-		Config:     m.config.Camera1,
-		logger:     m.logger.With(zap.String("camera", "camera1")),
+		ID:           "camera1",
+		DevicePath:   m.config.Camera1.Device,
+		Config:       m.config.Camera1,
+		logger:       m.logger.With(zap.String("camera", "camera1")),
+		resourceLock: m.resourceLocks["camera1"],
 	}
 	m.cameras["camera2"] = &Camera{
-		ID:         "camera2",
-		DevicePath: m.config.Camera2.Device,
-		Config:     m.config.Camera2,
-		logger:     m.logger.With(zap.String("camera", "camera2")),
+		ID:           "camera2",
+		DevicePath:   m.config.Camera2.Device,
+		Config:       m.config.Camera2,
+		logger:       m.logger.With(zap.String("camera", "camera2")),
+		resourceLock: m.resourceLocks["camera2"],
 	}
 	return m
 }
 
-// InitializeCamera initializes a specific camera
+// InitializeCamera initializes a specific camera with resource isolation
 func (m *Manager) InitializeCamera(cameraID string) error {
+	// Global initialization lock to prevent concurrent access to camera hardware
+	m.initMutex.Lock()
+	defer m.initMutex.Unlock()
+	
 	camera, exists := m.cameras[cameraID]
 	if !exists {
 		return fmt.Errorf("camera %s not found", cameraID)
 	}
 
-	camera.logger.Info("Initializing camera", zap.String("device_path", camera.DevicePath))
+	// Skip cameras with invalid dimensions (0x0)
+	if camera.Config.Width <= 0 || camera.Config.Height <= 0 {
+		m.logger.Info("Skipping camera with invalid dimensions", 
+			zap.String("camera", cameraID),
+			zap.Int("width", camera.Config.Width),
+			zap.Int("height", camera.Config.Height))
+		return nil
+	}
 
-	// Initialize capture with the correct arguments.
-	capture, err := NewCapture(camera.DevicePath, camera.Config, m.config.Encoding, m.config.Video, m.config, camera.logger)
+	// Acquire per-camera resource lock
+	camera.resourceLock.Lock()
+	defer camera.resourceLock.Unlock()
+
+	// Implement minimum delay between camera initializations to avoid hardware conflicts
+	if !m.lastInitTime.IsZero() {
+		timeSinceLastInit := time.Since(m.lastInitTime)
+		minDelay := time.Duration(m.config.Timeouts.CameraStartupDelay) * time.Millisecond
+		if timeSinceLastInit < minDelay {
+			waitTime := minDelay - timeSinceLastInit
+			m.logger.Info("Waiting for camera resource isolation delay", 
+				zap.String("camera", cameraID),
+				zap.Duration("wait_time", waitTime),
+				zap.Duration("min_delay", minDelay))
+			time.Sleep(waitTime)
+		}
+	}
+
+	m.logger.Info("Initializing camera with resource isolation", 
+		zap.String("camera", cameraID), 
+		zap.String("device_path", camera.DevicePath))
+
+	// Check for FullHD configuration and log memory considerations
+	isFullHD := camera.Config.Width >= 1920 || camera.Config.Height >= 1080
+	if isFullHD {
+		m.logger.Warn("FullHD camera detected - applying resource constraints", 
+			zap.String("camera", cameraID),
+			zap.Int("width", camera.Config.Width),
+			zap.Int("height", camera.Config.Height),
+			zap.Int("target_width", camera.Config.TargetWidth),
+			zap.Int("target_height", camera.Config.TargetHeight))
+	}
+
+	// Create capture instance
+	capture, err := NewCapture(
+		camera.DevicePath,
+		camera.Config,
+		m.config.Encoding,
+		m.config.Video,
+		m.config,
+		camera.logger,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to initialize capture for %s: %w", cameraID, err)
+		return fmt.Errorf("failed to create capture for camera %s: %w", cameraID, err)
 	}
 	camera.Capture = capture
 
-	// Initialize encoder
-	encoder, err := NewEncoder(camera.Config, m.config.Encoding, m.config, camera.logger)
+	// Create encoder instance
+	encoder, err := NewEncoder(
+		camera.Config,
+		m.config.Encoding,
+		m.config,
+		camera.logger,
+	)
 	if err != nil {
-		capture.Close() // Cleanup capture on encoder failure
-		return fmt.Errorf("failed to initialize encoder for %s: %w", cameraID, err)
+		return fmt.Errorf("failed to create encoder for camera %s: %w", cameraID, err)
 	}
 	camera.Encoder = encoder
 
-	camera.logger.Info("Camera initialized successfully")
+	// Record initialization time for resource isolation
+	camera.initTime = time.Now()
+	m.lastInitTime = camera.initTime
+
+	m.logger.Info("Camera initialized successfully with resource isolation", 
+		zap.String("camera", cameraID),
+		zap.Bool("is_fullhd", isFullHD))
 	return nil
 }
 
-// StartCamera starts video capture and encoding for a camera
+// StartCamera starts a specific camera with resource management
 func (m *Manager) StartCamera(cameraID string) error {
 	camera, exists := m.cameras[cameraID]
 	if !exists {
 		return fmt.Errorf("camera %s not found", cameraID)
 	}
 
+	// Skip cameras with invalid dimensions (0x0)
+	if camera.Config.Width <= 0 || camera.Config.Height <= 0 {
+		m.logger.Info("Skipping start of camera with invalid dimensions", 
+			zap.String("camera", cameraID),
+			zap.Int("width", camera.Config.Width),
+			zap.Int("height", camera.Config.Height))
+		return nil
+	}
+
+	// Acquire resource lock for this camera
+	camera.resourceLock.Lock()
+	defer camera.resourceLock.Unlock()
+
 	if camera.isRunning {
 		return fmt.Errorf("camera %s is already running", cameraID)
 	}
 
+	// Skip if capture/encoder wasn't initialized (due to invalid dimensions)
 	if camera.Capture == nil || camera.Encoder == nil {
-		return fmt.Errorf("camera %s not initialized", cameraID)
+		m.logger.Info("Skipping start of uninitialized camera", zap.String("camera", cameraID))
+		return nil
 	}
 
-	camera.logger.Info("Starting camera")
+	m.logger.Info("Starting camera with resource protection", zap.String("camera", cameraID))
 
-	// Start capture
-	if err := camera.Capture.Start(); err != nil {
-		return fmt.Errorf("failed to start capture for %s: %w", cameraID, err)
+	// Check if enough time has passed since initialization for hardware to be ready
+	if !camera.initTime.IsZero() {
+		timeSinceInit := time.Since(camera.initTime)
+		minInitDelay := time.Duration(m.config.Timeouts.CameraStartupDelay/2) * time.Millisecond
+		if timeSinceInit < minInitDelay {
+			waitTime := minInitDelay - timeSinceInit
+			m.logger.Info("Waiting for camera hardware ready delay", 
+				zap.String("camera", cameraID),
+				zap.Duration("wait_time", waitTime))
+			time.Sleep(waitTime)
+		}
 	}
 
-	// Start encoder
+	// Start encoder first
 	if err := camera.Encoder.Start(); err != nil {
-		camera.Capture.Stop() // Cleanup on failure
-		return fmt.Errorf("failed to start encoder for %s: %w", cameraID, err)
+		return fmt.Errorf("failed to start encoder for camera %s: %w", cameraID, err)
 	}
 
-	// Connect capture output to encoder input
-	go m.connectCaptureToEncoder(camera)
+	// Start capture with small delay to ensure encoder is ready
+	time.Sleep(100 * time.Millisecond)
+	if err := camera.Capture.Start(); err != nil {
+		// If capture fails, stop the encoder
+		camera.Encoder.Stop()
+		return fmt.Errorf("failed to start capture for camera %s: %w", cameraID, err)
+	}
 
 	camera.isRunning = true
-	camera.logger.Info("Camera started successfully")
+
+	// Start the capture-to-encoder bridge
+	m.logger.Info("Starting capture-to-encoder bridge with resource management", zap.String("camera", cameraID))
+	go m.connectCaptureToEncoder(camera)
+
 	return nil
 }
 
