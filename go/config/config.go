@@ -47,9 +47,10 @@ type CropConfig struct {
 
 // ServerConfig holds web server settings
 type ServerConfig struct {
-	WebPort int    `toml:"web_port" json:"web_port"`
-	BindIP  string `toml:"bind_ip" json:"bind_ip"`
-	PIIp    string `toml:"pi_ip" json:"pi_ip"` // Auto-detected if empty
+	WebPort        int      `toml:"web_port" json:"web_port"`
+	BindIP         string   `toml:"bind_ip" json:"bind_ip"`
+	PIIp           string   `toml:"pi_ip" json:"pi_ip"` // Auto-detected if empty
+	AllowedOrigins []string `toml:"allowed_origins" json:"allowed_origins"` // CORS allowed origins
 }
 
 // EncodingConfig holds video encoding settings
@@ -71,19 +72,25 @@ type VideoConfig struct {
 
 // WebRTCConfig holds WebRTC-specific settings
 type WebRTCConfig struct {
-	STUNServer   string `toml:"stun_server" json:"stun_server"`
-	MaxClients   int    `toml:"max_clients" json:"max_clients"`
-	MTU          int    `toml:"mtu" json:"mtu"`
-	Latency      int    `toml:"latency" json:"latency"`
-	Timeout      int    `toml:"timeout" json:"timeout"`
+	STUNServers     []string `toml:"stun_servers" json:"stun_servers"`
+	TURNServers     []string `toml:"turn_servers" json:"turn_servers"`
+	TURNUsername    string   `toml:"turn_username" json:"turn_username"`
+	TURNCredential  string   `toml:"turn_credential" json:"turn_credential"`
+	MaxClients      int      `toml:"max_clients" json:"max_clients"`
+	MTU             int      `toml:"mtu" json:"mtu"`
+	Latency         int      `toml:"latency" json:"latency"`
+	Timeout         int      `toml:"timeout" json:"timeout"`
+	// Legacy field for backwards compatibility
+	STUNServer      string   `toml:"stun_server" json:"stun_server"`
 }
 
 // BufferConfig holds buffer size settings for channels
 type BufferConfig struct {
-	FrameChannelSize    int `toml:"frame_channel_size" json:"frame_channel_size"`
-	EncodedChannelSize  int `toml:"encoded_channel_size" json:"encoded_channel_size"`
-	SignalChannelSize   int `toml:"signal_channel_size" json:"signal_channel_size"`
-	ErrorChannelSize    int `toml:"error_channel_size" json:"error_channel_size"`
+	FrameChannelSize     int `toml:"frame_channel_size" json:"frame_channel_size"`
+	EncodedChannelSize   int `toml:"encoded_channel_size" json:"encoded_channel_size"`
+	SignalChannelSize    int `toml:"signal_channel_size" json:"signal_channel_size"`
+	ErrorChannelSize     int `toml:"error_channel_size" json:"error_channel_size"`
+	WebSocketSendBuffer  int `toml:"websocket_send_buffer" json:"websocket_send_buffer"`
 }
 
 // TimeoutConfig holds timeout and delay settings
@@ -150,8 +157,9 @@ func LoadConfig(configPath string) (*Config, error) {
 			},
 		},
 		Server: ServerConfig{
-			WebPort: 8080,
-			BindIP:  "0.0.0.0",
+			WebPort:        8080,
+			BindIP:         "0.0.0.0",
+			AllowedOrigins: []string{"*"}, // Default to allow all, should be configured in production
 		},
 		Encoding: EncodingConfig{
 			Codec:            "vp8",
@@ -160,11 +168,15 @@ func LoadConfig(configPath string) (*Config, error) {
 			CPUUsed:          8,
 		},
 		WebRTC: WebRTCConfig{
-			STUNServer: "stun:stun.l.google.com:19302",
-			MaxClients: 4,
-			MTU:        1200,
-			Latency:    200,
-			Timeout:    10000,
+			STUNServers:    []string{"stun:stun.l.google.com:19302"},
+			TURNServers:    []string{},
+			TURNUsername:   "",
+			TURNCredential: "",
+			MaxClients:     4,
+			MTU:            1200,
+			Latency:        200,
+			Timeout:        10000,
+			STUNServer:     "stun:stun.l.google.com:19302", // Legacy support
 		},
 		Video: VideoConfig{
 			Codec:           "h264",
@@ -174,10 +186,11 @@ func LoadConfig(configPath string) (*Config, error) {
 			Bitrate:          2000000,
 		},
 		Buffers: BufferConfig{
-			FrameChannelSize:    30,
-			EncodedChannelSize:  20,
-			SignalChannelSize:   1,
-			ErrorChannelSize:    1,
+			FrameChannelSize:     30,
+			EncodedChannelSize:   20,
+			SignalChannelSize:    1,
+			ErrorChannelSize:     1,
+			WebSocketSendBuffer:  1024,
 		},
 		Timeouts: TimeoutConfig{
 			WebRTCStartupDelay:    2000,

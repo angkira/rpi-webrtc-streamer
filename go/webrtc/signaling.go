@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
 	"go.uber.org/zap"
@@ -15,33 +17,41 @@ import (
 type SignalingServer struct {
 	upgrader websocket.Upgrader
 	logger   *zap.Logger
-	
+
 	// Connected clients
 	clients map[string]*SignalingClient
 	mu      sync.RWMutex
-	
+
 	// WebRTC configuration
 	webrtcConfig webrtc.Configuration
-	
+
 	// Message handlers
 	onOffer  func(client *SignalingClient, offer webrtc.SessionDescription) error
 	onAnswer func(client *SignalingClient, answer webrtc.SessionDescription) error
 	onICE    func(client *SignalingClient, candidate webrtc.ICECandidateInit) error
+
+	// Configuration
+	allowedOrigins []string
+	sendBufferSize int
 }
 
 // SignalingClient represents a connected WebSocket client
 type SignalingClient struct {
-	id     string
-	conn   *websocket.Conn
-	server *SignalingServer
-	logger *zap.Logger
-	
+	id        string
+	conn      *websocket.Conn
+	server    *SignalingServer
+	logger    *zap.Logger
+
 	// Send channel for outgoing messages
-	send chan []byte
-	
+	send      chan []byte
+
 	// Cleanup
-	closed bool
-	mu     sync.RWMutex
+	closed    bool
+	mu        sync.RWMutex
+
+	// Connection tracking
+	connectedAt time.Time
+	lastPing    time.Time
 }
 
 // SignalingMessage represents a WebRTC signaling message
@@ -51,17 +61,60 @@ type SignalingMessage struct {
 }
 
 // NewSignalingServer creates a new signaling server
-func NewSignalingServer(webrtcConfig webrtc.Configuration, logger *zap.Logger) *SignalingServer {
-	return &SignalingServer{
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all origins for development
-			},
-		},
-		logger:       logger,
-		clients:      make(map[string]*SignalingClient),
-		webrtcConfig: webrtcConfig,
+func NewSignalingServer(webrtcConfig webrtc.Configuration, allowedOrigins []string, sendBufferSize int, logger *zap.Logger) *SignalingServer {
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = []string{"*"}
 	}
+	if sendBufferSize <= 0 {
+		sendBufferSize = 1024
+	}
+
+	s := &SignalingServer{
+		logger:         logger,
+		clients:        make(map[string]*SignalingClient),
+		webrtcConfig:   webrtcConfig,
+		allowedOrigins: allowedOrigins,
+		sendBufferSize: sendBufferSize,
+	}
+
+	s.upgrader = websocket.Upgrader{
+		CheckOrigin: s.checkOrigin,
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+
+	return s
+}
+
+// checkOrigin validates the request origin against allowed origins
+func (s *SignalingServer) checkOrigin(r *http.Request) bool {
+	// Allow all origins if wildcard is set
+	for _, allowed := range s.allowedOrigins {
+		if allowed == "*" {
+			s.logger.Debug("Allowing all origins (wildcard)")
+			return true
+		}
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// No origin header - allow for non-browser clients
+		s.logger.Debug("No origin header, allowing connection")
+		return true
+	}
+
+	// Check if origin is in allowed list
+	for _, allowed := range s.allowedOrigins {
+		if origin == allowed {
+			s.logger.Debug("Origin allowed", zap.String("origin", origin))
+			return true
+		}
+	}
+
+	s.logger.Warn("Origin not allowed",
+		zap.String("origin", origin),
+		zap.Strings("allowed_origins", s.allowedOrigins))
+	return false
 }
 
 // SetHandlers sets the message handlers
@@ -84,16 +137,19 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Create client ID
-	clientID := fmt.Sprintf("client_%d", len(s.clients))
-	
+	// Generate unique client ID using UUID
+	clientID := uuid.New().String()
+
 	// Create client
+	now := time.Now()
 	client := &SignalingClient{
-		id:     clientID,
-		conn:   conn,
-		server: s,
-		logger: s.logger.With(zap.String("client_id", clientID)),
-		send:   make(chan []byte, 256),
+		id:          clientID,
+		conn:        conn,
+		server:      s,
+		logger:      s.logger.With(zap.String("client_id", clientID)),
+		send:        make(chan []byte, s.sendBufferSize),
+		connectedAt: now,
+		lastPing:    now,
 	}
 
 	// Register client
@@ -101,7 +157,9 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 	s.clients[clientID] = client
 	s.mu.Unlock()
 
-	client.logger.Info("Client connected")
+	client.logger.Info("Client connected",
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.Header.Get("User-Agent")))
 
 	// Start goroutines
 	go client.writePump()
@@ -188,6 +246,9 @@ func (c *SignalingClient) handleMessage(msg SignalingMessage) error {
 		}
 
 	case "ping":
+		c.mu.Lock()
+		c.lastPing = time.Now()
+		c.mu.Unlock()
 		c.sendMessage("pong", nil)
 
 	default:
@@ -228,14 +289,14 @@ func (c *SignalingClient) SendICECandidate(candidate *webrtc.ICECandidate) error
 	return c.sendMessage("ice-candidate", candidateInit)
 }
 
-// sendMessage sends a message to the client
+// sendMessage sends a message to the client with timeout
 func (c *SignalingClient) sendMessage(msgType string, data interface{}) error {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	if c.closed {
+		c.mu.RUnlock()
 		return fmt.Errorf("client connection closed")
 	}
+	c.mu.RUnlock()
 
 	msg := SignalingMessage{
 		Type: msgType,
@@ -247,13 +308,17 @@ func (c *SignalingClient) sendMessage(msgType string, data interface{}) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
+	// Try to send with timeout to prevent blocking
 	select {
 	case c.send <- jsonData:
-	default:
-		c.logger.Warn("Client send channel full, dropping message")
+		return nil
+	case <-time.After(5 * time.Second):
+		c.logger.Error("Send timeout - client too slow, closing connection",
+			zap.String("message_type", msgType))
+		// Close the slow client
+		go c.close()
+		return fmt.Errorf("send timeout - client too slow")
 	}
-
-	return nil
 }
 
 // sendError sends an error message to the client
@@ -271,13 +336,20 @@ func (c *SignalingClient) close() {
 	}
 
 	c.closed = true
-	c.conn.Close()
+
+	// Close connection if it exists (may be nil in tests)
+	if c.conn != nil {
+		c.conn.Close()
+	}
+
 	close(c.send)
 
-	// Remove from server clients
-	c.server.mu.Lock()
-	delete(c.server.clients, c.id)
-	c.server.mu.Unlock()
+	// Remove from server clients (check if server exists for test scenarios)
+	if c.server != nil {
+		c.server.mu.Lock()
+		delete(c.server.clients, c.id)
+		c.server.mu.Unlock()
+	}
 
 	c.logger.Info("Client disconnected")
 }

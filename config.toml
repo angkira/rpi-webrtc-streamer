@@ -14,42 +14,31 @@ data-publisher-address = "tcp://127.0.0.1:5559"
 web_port = 8080
 bind_ip = "0.0.0.0"
 pi_ip = "" # Auto-detected if empty
+allowed_origins = ["*"] # CORS allowed origins (* for all, or specific origins)
 
 [webrtc]
-# Enable WebRTC
-enabled = true
-# WebRTC server port for camera 1
-webrtc_port_1 = 5557
-# WebRTC server port for camera 2
-webrtc_port_2 = 5558
+# STUN servers for NAT traversal (can specify multiple)
+stun_servers = ["stun:stun.l.google.com:19302"]
+# TURN servers for restrictive NATs (optional)
+turn_servers = []
+turn_username = ""
+turn_credential = ""
 # Maximum number of concurrent clients per camera
 max_clients = 4
-# Target bitrate for video encoding (bits per second)
-bitrate = 2000000
 # MTU size for RTP packets
 mtu = 1200
 # WebRTC latency in milliseconds (affects timing calculations)
 latency = 200
 # Network timeout for WebRTC connections (milliseconds)
 timeout = 10000
-# STUN server URL for NAT traversal
-stun_server = "stun:stun.l.google.com:19302"
-# Data channels configuration
-data_channels = true
-# Codec: "vp8" or "h264"
-codec = "h264"
 
 [video]
-codec = "h264" # Codec: "vp8" or "h264"
-encoder-preset = "fast" # Encoder preset: "realtime", "good", "best"
+# Primary codec configuration - used by both capture and WebRTC
+codec = "h264" # Options: "vp8" or "h264"
+encoder-preset = "ultrafast" # For h264: ultrafast, fast, medium, slow
 keyframe-interval = 30 # Keyframe interval in frames
 cpu-used = 8 # CPU usage setting for VP8 (higher = faster, lower quality)
-
-[encoding]
-codec = "vp8"
-bitrate = 2000000
-keyframe_interval = 30
-cpu_used = 8
+bitrate = 2000000 # Target bitrate in bits per second
 
 [camera1]
 device = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"

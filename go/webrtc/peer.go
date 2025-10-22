@@ -102,21 +102,39 @@ func (p *PeerConnection) setupEventHandlers() {
 	// ICE connection state change
 	p.pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
 		p.logger.Info("ICE connection state changed", zap.String("state", connectionState.String()))
-		
+
 		if connectionState == webrtc.ICEConnectionStateFailed ||
-		   connectionState == webrtc.ICEConnectionStateClosed ||
-		   connectionState == webrtc.ICEConnectionStateDisconnected {
-			p.logger.Warn("ICE connection lost")
+			connectionState == webrtc.ICEConnectionStateClosed ||
+			connectionState == webrtc.ICEConnectionStateDisconnected {
+			p.logger.Warn("ICE connection lost", zap.String("state", connectionState.String()))
+			// Trigger cleanup on failure/disconnection after a delay
+			// This allows for temporary network issues to recover
+			go func() {
+				time.Sleep(10 * time.Second)
+				if p.pc.ICEConnectionState() == connectionState {
+					p.logger.Info("ICE state still failed/disconnected after timeout, will be cleaned up")
+				}
+			}()
 		}
 	})
 
-	// Connection state change
+	// Connection state change - primary handler for lifecycle
 	p.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		p.logger.Info("Peer connection state changed", zap.String("state", state.String()))
-		
-		if state == webrtc.PeerConnectionStateFailed ||
-		   state == webrtc.PeerConnectionStateClosed {
-			p.logger.Warn("Peer connection lost")
+
+		switch state {
+		case webrtc.PeerConnectionStateFailed:
+			p.logger.Error("Peer connection failed")
+			// Connection cannot be recovered, trigger cleanup
+			p.StopStreaming()
+		case webrtc.PeerConnectionStateClosed:
+			p.logger.Info("Peer connection closed")
+			p.StopStreaming()
+		case webrtc.PeerConnectionStateDisconnected:
+			p.logger.Warn("Peer connection disconnected, waiting for reconnection...")
+			// Don't immediately cleanup, allow ICE restart
+		case webrtc.PeerConnectionStateConnected:
+			p.logger.Info("Peer connection established successfully")
 		}
 	})
 

@@ -48,14 +48,39 @@ type Server struct {
 // NewServer creates a new WebRTC server for a camera
 func NewServer(cameraID string, port int, cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
+	// Build ICE servers list
+	iceServers := []webrtc.ICEServer{}
+
+	// Add STUN servers
+	stunURLs := cfg.WebRTC.STUNServers
+	if len(stunURLs) == 0 && cfg.WebRTC.STUNServer != "" {
+		// Fallback to legacy single STUN server
+		stunURLs = []string{cfg.WebRTC.STUNServer}
+	}
+	if len(stunURLs) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs: stunURLs,
+		})
+	}
+
+	// Add TURN servers if configured
+	if len(cfg.WebRTC.TURNServers) > 0 {
+		turnServer := webrtc.ICEServer{
+			URLs: cfg.WebRTC.TURNServers,
+		}
+		if cfg.WebRTC.TURNUsername != "" {
+			turnServer.Username = cfg.WebRTC.TURNUsername
+		}
+		if cfg.WebRTC.TURNCredential != "" {
+			turnServer.Credential = cfg.WebRTC.TURNCredential
+		}
+		iceServers = append(iceServers, turnServer)
+	}
+
 	// Configure WebRTC
 	webrtcConfig := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{cfg.WebRTC.STUNServer},
-			},
-		},
+		ICEServers: iceServers,
 	}
 
 	server := &Server{
@@ -69,9 +94,19 @@ func NewServer(cameraID string, port int, cfg *config.Config, logger *zap.Logger
 		cancel:       cancel,
 	}
 
-	// Create signaling server
-	server.signaling = NewSignalingServer(webrtcConfig, server.logger)
+	// Create signaling server with CORS and buffer configuration
+	server.signaling = NewSignalingServer(
+		webrtcConfig,
+		cfg.Server.AllowedOrigins,
+		cfg.Buffers.WebSocketSendBuffer,
+		server.logger,
+	)
 	server.setupSignalingHandlers()
+
+	logger.Info("WebRTC server created",
+		zap.Int("stun_servers", len(stunURLs)),
+		zap.Int("turn_servers", len(cfg.WebRTC.TURNServers)),
+		zap.Strings("allowed_origins", cfg.Server.AllowedOrigins))
 
 	return server, nil
 }
@@ -100,11 +135,13 @@ func (s *Server) handleOffer(client *SignalingClient, offer webrtc.SessionDescri
 		fps = s.camera.Config.FPS
 	}
 
-	// Create new peer connection for this client
-	codec := "vp8"
-	if s.config != nil {
+	// Get codec from unified video configuration
+	codec := "h264" // Default
+	if s.config != nil && s.config.Video.Codec != "" {
 		codec = s.config.Video.Codec
+		s.logger.Debug("Using codec from config", zap.String("codec", codec))
 	}
+
 	peer, err := NewPeerConnection(client.GetID(), s.webrtcConfig, fps, codec, s.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create peer connection: %w", err)
@@ -118,7 +155,25 @@ func (s *Server) handleOffer(client *SignalingClient, offer webrtc.SessionDescri
 	// Set up ICE candidate handling
 	peer.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			client.SendICECandidate(candidate)
+			if err := client.SendICECandidate(candidate); err != nil {
+				s.logger.Error("Failed to send ICE candidate",
+					zap.String("client_id", client.GetID()),
+					zap.Error(err))
+			}
+		}
+	})
+
+	// Set up connection state monitoring for automatic cleanup
+	peer.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		s.logger.Info("Peer connection state changed",
+			zap.String("client_id", client.GetID()),
+			zap.String("state", state.String()))
+
+		if state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateClosed {
+			s.logger.Info("Connection failed/closed, removing peer",
+				zap.String("client_id", client.GetID()))
+			s.removePeer(client.GetID())
 		}
 	})
 

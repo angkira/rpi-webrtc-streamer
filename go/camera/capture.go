@@ -501,10 +501,11 @@ func (c *Capture) buildGStreamerPipeline() string {
 		c.logger.Info("No flip method specified, skipping videoflip")
 	}
 
-	// 4. Add memory-constrained queue immediately after flip for FullHD
+	// 4. Add low-latency queue immediately after flip for FullHD
 	if isFullHD {
-		pipeline.WriteString(" ! queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream")
-		c.logger.Info("Added FullHD memory-constrained queue after flip")
+		// Use minimal buffering for low latency - only 1 buffer, drop old frames immediately
+		pipeline.WriteString(" ! queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 leaky=downstream")
+		c.logger.Info("Added FullHD low-latency queue after flip (max 1 buffer)")
 	}
 
 	// 5. Use videoconvert to handle the negotiation. It will accept the raw format
@@ -526,11 +527,11 @@ func (c *Capture) buildGStreamerPipeline() string {
 	// 7. Add scaling if enabled and dimensions differ - with optimized settings for FullHD
 	c.addOptimizedScalingToPipeline(&pipeline, isFullHD)
 
-	// 8. Add a memory-constrained queue for stability, placed after format conversion and scaling
+	// 8. Add low-latency queue for stability, placed after format conversion and scaling
 	if isFullHD {
-		// Tighter memory control for FullHD processing
-		pipeline.WriteString(" ! queue max-size-buffers=3 max-size-time=100000000 max-size-bytes=0 leaky=downstream")
-		c.logger.Info("Added FullHD processing queue with tight memory constraints")
+		// Ultra-low latency: only 1 buffer, NO time buffering, drop old frames immediately
+		pipeline.WriteString(" ! queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 leaky=downstream")
+		c.logger.Info("Added FullHD ultra-low latency queue (max 1 buffer, no time buffering)")
 	} else {
 		// Standard queue for lower resolutions
 		pipeline.WriteString(" ! queue")

@@ -1,9 +1,18 @@
-const RPI_IP = "192.168.5.75";
+// Dynamic configuration - will be loaded from server
+let RPI_IP = window.location.hostname || "localhost";
+let RPI_WEB_PORT = window.location.port || "8080";
+
 const logElement = document.getElementById('logs');
 const sensorDataElement = document.getElementById('sensor-data');
 const globalConfigElement = document.getElementById('global-config-data');
 const globalConfigDisplayElement = document.getElementById('global-config-display');
 let globalConfig = null; // Store global configuration
+
+// Connection tracking
+const connectionState = {
+    camera1: { ws: null, pc: null, reconnectAttempts: 0, maxRetries: 10 },
+    camera2: { ws: null, pc: null, reconnectAttempts: 0, maxRetries: 10 }
+};
 
 const log = (message) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -91,12 +100,36 @@ const updateVideoInfo = (camId, originalResolution, targetResolution, fps, codec
 };
 
 const startStream = async (port, videoElem, cameraName, receiveSensorData = false) => {
-    console.log(`[${cameraName}] startStream called. globalConfig:`, globalConfig); // Debugging globalConfig
-    const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    });
+    console.log(`[${cameraName}] startStream called. globalConfig:`, globalConfig);
 
+    // Build ICE servers from config or use defaults
+    let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    if (globalConfig && globalConfig.webrtc) {
+        iceServers = [];
+        // Add STUN servers
+        if (globalConfig.webrtc.stun_servers && globalConfig.webrtc.stun_servers.length > 0) {
+            iceServers.push({ urls: globalConfig.webrtc.stun_servers });
+        }
+        // Add TURN servers
+        if (globalConfig.webrtc.turn_servers && globalConfig.webrtc.turn_servers.length > 0) {
+            const turnServer = { urls: globalConfig.webrtc.turn_servers };
+            if (globalConfig.webrtc.turn_username) {
+                turnServer.username = globalConfig.webrtc.turn_username;
+            }
+            if (globalConfig.webrtc.turn_credential) {
+                turnServer.credential = globalConfig.webrtc.turn_credential;
+            }
+            iceServers.push(turnServer);
+        }
+        log(`${cameraName}: Using ${iceServers.length} ICE servers from config`);
+    }
+
+    const pc = new RTCPeerConnection({ iceServers });
     const ws = new WebSocket(`ws://${RPI_IP}:${port}/ws`);
+
+    // Store connections for reconnection
+    connectionState[cameraName].ws = ws;
+    connectionState[cameraName].pc = pc;
     
     let iceCandidateQueue = [];
     let remoteDescriptionSet = false;
@@ -108,6 +141,7 @@ const startStream = async (port, videoElem, cameraName, receiveSensorData = fals
         if (event.track.kind === 'video') {
             videoElem.srcObject = new MediaStream([event.track]);
             updateStatus(cameraName, 'good', 'Connected ✓');
+            resetReconnectionState(cameraName); // Reset reconnection counter on success
             log(`${cameraName}: Video stream connected!`);
 
             const videoTrack = event.track;
@@ -284,7 +318,44 @@ const startStream = async (port, videoElem, cameraName, receiveSensorData = fals
     ws.onclose = () => {
         log(`${cameraName}: WebSocket closed`);
         updateStatus(cameraName, 'error', 'Disconnected ✗');
+
+        // Attempt reconnection
+        attemptReconnection(port, videoElem, cameraName, receiveSensorData);
     };
+
+    // Send periodic ping to keep connection alive
+    const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+        } else {
+            clearInterval(pingInterval);
+        }
+    }, 30000); // Every 30 seconds
+};
+
+const attemptReconnection = (port, videoElem, cameraName, receiveSensorData) => {
+    const state = connectionState[cameraName];
+
+    if (state.reconnectAttempts >= state.maxRetries) {
+        log(`${cameraName}: Max reconnection attempts (${state.maxRetries}) reached`);
+        updateStatus(cameraName, 'error', `Failed after ${state.maxRetries} retries ✗`);
+        return;
+    }
+
+    state.reconnectAttempts++;
+    const delaySeconds = Math.min(state.reconnectAttempts * 2, 30); // Exponential backoff, max 30s
+
+    log(`${cameraName}: Reconnecting in ${delaySeconds}s (attempt ${state.reconnectAttempts}/${state.maxRetries})...`);
+    updateStatus(cameraName, 'connecting', `Reconnecting in ${delaySeconds}s...`);
+
+    setTimeout(() => {
+        log(`${cameraName}: Attempting to reconnect...`);
+        startStream(port, videoElem, cameraName, receiveSensorData);
+    }, delaySeconds * 1000);
+};
+
+const resetReconnectionState = (cameraName) => {
+    connectionState[cameraName].reconnectAttempts = 0;
 };
 
 const fetchGlobalConfig = () => {
@@ -298,11 +369,26 @@ const fetchGlobalConfig = () => {
         .then(config => {
             globalConfig = config; // Store config globally
             console.log('Global Config Fetched:', globalConfig);
-            globalConfigDisplayElement.innerHTML = formatConfigAsTable(config, true); // Use the new element
-            
+
+            // Update RPI_IP from config if available
+            if (config.server && config.server.pi_ip) {
+                RPI_IP = config.server.pi_ip;
+                log(`Using server IP from config: ${RPI_IP}`);
+            } else {
+                log(`Using detected IP: ${RPI_IP}`);
+            }
+
+            globalConfigDisplayElement.innerHTML = formatConfigAsTable(config, true);
+
+            // Get WebRTC ports from config
+            const camera1Port = config.camera1?.webrtc_port || 5557;
+            const camera2Port = config.camera2?.webrtc_port || 5558;
+
+            log(`Initializing streams - Camera1: ${camera1Port}, Camera2: ${camera2Port}`);
+
             // Initialize streams AFTER global config is loaded
-            startStream(5557, document.getElementById('video1'), 'camera1');
-            startStream(5558, document.getElementById('video2'), 'camera2', true);
+            startStream(camera1Port, document.getElementById('video1'), 'camera1');
+            startStream(camera2Port, document.getElementById('video2'), 'camera2', true);
 
             // Setup accordions - Removed redundant loop
             // document.querySelectorAll('.accordion-button').forEach(button => {
