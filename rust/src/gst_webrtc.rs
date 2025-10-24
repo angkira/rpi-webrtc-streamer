@@ -138,15 +138,24 @@ async fn handle_client(stream: TcpStream, app_state: Arc<Mutex<AppState>>, confi
     let client = WebRTCClient::new(&pipeline, &tee, &config_arc)?;
     let result = client.handle_connection(stream, config_arc).await;
 
-    // Simple cleanup: Decrement client count and manage pipeline state
+    // CRITICAL MEMORY FIX: Proper cleanup with buffer flushing
     {
         let mut state = app_state.lock().await;
         state.client_count = state.client_count.saturating_sub(1);
-        
+
+        log::info!("Client disconnected, {} clients remaining", state.client_count);
+
+        // ALWAYS flush buffers after client disconnect to prevent accumulation
+        if let Err(e) = state.camera_pipeline.flush_buffers() {
+            log::warn!("Failed to flush pipeline buffers: {}", e);
+        } else {
+            log::debug!("Successfully flushed pipeline buffers after client disconnect");
+        }
+
         // Stop the pipeline when no clients are connected
         if state.client_count == 0 {
             log::info!("No clients connected, stopping camera pipeline");
-            
+
             if let Err(e) = state.camera_pipeline.pipeline.set_state(gstreamer::State::Null) {
                 log::warn!("Failed to stop camera pipeline: {}", e);
             }

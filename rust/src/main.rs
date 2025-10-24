@@ -14,6 +14,7 @@ mod camera;
 mod processing;
 mod webrtc;
 mod web_server;
+mod streaming;  // PHASE 3: Zero-copy frame distribution
 
 use crate::config::load_config;
 use crate::sensors::{

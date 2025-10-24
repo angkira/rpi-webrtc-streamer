@@ -1,0 +1,42 @@
+[Unit]
+Description=Pi Camera WebRTC Streamer (Rust - THE ULTIMATE SOLUTION)
+After=network.target
+Wants=network.target
+Conflicts=pi-camera-streamer.service
+
+[Service]
+Type=simple
+User=angkira
+Group=angkira
+
+# Set working directory to where the binary is deployed
+WorkingDirectory=/home/angkira/opt/rpi_sensor_streamer
+
+# Path to the executable
+ExecStart=/home/angkira/opt/rpi_sensor_streamer/rpi_sensor_streamer
+
+# Restart behavior
+Restart=always
+RestartSec=5
+
+# Fast graceful shutdown
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables
+Environment="RUST_LOG=info"
+Environment="RUST_BACKTRACE=1"
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# Allow writing to the deployment directory if needed (e.g., for logs or configs)
+ReadWritePaths=/home/angkira/opt/rpi_sensor_streamer
+
+[Install]
+WantedBy=multi-user.target

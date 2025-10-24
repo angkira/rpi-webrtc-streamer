@@ -140,11 +140,11 @@ impl WebRTCClient {
         let ice_ws_sender = ws_sender_arc.clone();
         let ice_task_handle = tokio::spawn(async move {
             while let Some((mline, cand)) = ice_rx.recv().await {
-                let msg = serde_json::json!({ 
-                    "iceCandidate": { 
-                        "candidate": cand, 
-                        "sdpMLineIndex": mline 
-                    } 
+                let msg = serde_json::json!({
+                    "iceCandidate": {
+                        "candidate": cand,
+                        "sdpMLineIndex": mline
+                    }
                 });
                 if let Err(e) = ice_ws_sender.lock().await.send(Message::Text(msg.to_string().into())).await {
                     warn!("Failed to send ICE candidate: {}", e);
@@ -173,7 +173,7 @@ impl WebRTCClient {
         ice_task_handle.abort();
 
         log::info!("WebRTC client disconnected. Cleaning up.");
-        self.cleanup();
+        self.cleanup_async().await;
         debug!("WebRTC client disconnected");
         Ok(())
     }
@@ -338,13 +338,13 @@ impl WebRTCClient {
         match local_rx.recv() {
             Ok(Ok(())) => {
                 let sdp = answer_desc.sdp().as_text()?;
-                let msg = serde_json::json!({ 
-                    "answer": { 
-                        "type": "answer", 
-                        "sdp": sdp 
-                    } 
+                let msg = serde_json::json!({
+                    "answer": {
+                        "type": "answer",
+                        "sdp": sdp
+                    }
                 });
-                
+
                 log::debug!("Sending SDP answer to client");
                 ws_tx.lock().await.send(Message::Text(msg.to_string().into())).await?;
             }
@@ -354,6 +354,59 @@ impl WebRTCClient {
         }
         
         Ok(())
+    }
+
+    /// Async version of cleanup for use in async contexts
+    pub async fn cleanup_async(&mut self) {
+        info!("Cleaning up WebRTC client resources (async)");
+
+        // SIMPLIFIED CLEANUP: Focus on essential resource release only
+
+        // 1. Stop data flow by setting elements to READY state first
+        let _ = self.webrtcbin.set_state(gst::State::Ready);
+        let _ = self.queue.set_state(gst::State::Ready);
+
+        // 2. Clean up payloader elements (but don't try to unlink during cleanup)
+        {
+            let mut payloader_elements = self.payloader_elements.lock().await;
+            for element in payloader_elements.iter() {
+                let _ = element.set_state(gst::State::Ready);
+            }
+            // Don't try to remove elements individually - let the pipeline handle it
+            payloader_elements.clear();
+        }
+
+        // 3. Release WebRTC sink pad BEFORE unlinking
+        {
+            let mut webrtc_sink_pad = self.webrtc_sink_pad.lock().await;
+            if let Some(pad) = webrtc_sink_pad.take() {
+                self.webrtcbin.release_request_pad(&pad);
+                log::debug!("Released webrtc sink pad");
+            }
+        }
+
+        // 4. Unlink tee -> queue connection cleanly
+        if let Some(queue_sink_pad) = self.queue.static_pad("sink") {
+            if let Err(e) = self.tee_src_pad.unlink(&queue_sink_pad) {
+                // Don't log this as error - it's expected during shutdown
+                log::debug!("Queue already unlinked during cleanup: {}", e);
+            }
+        }
+
+        // 5. Release tee pad
+        if let Some(tee) = self.tee_src_pad.parent_element() {
+            tee.release_request_pad(&self.tee_src_pad);
+            log::debug!("Released tee src pad");
+        }
+
+        // 6. Set to NULL state for final cleanup
+        let _ = self.webrtcbin.set_state(gst::State::Null);
+        let _ = self.queue.set_state(gst::State::Null);
+
+        // 7. Remove elements from pipeline (this handles the complex unlinking)
+        let _ = self.pipeline.remove_many(&[&self.queue, &self.webrtcbin]);
+
+        info!("WebRTC client cleanup completed");
     }
 
     /// Properly cleanup WebRTC resources to prevent memory leaks

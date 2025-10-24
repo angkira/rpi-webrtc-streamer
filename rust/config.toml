@@ -33,7 +33,7 @@ latency = 200
 # Network timeout for WebRTC connections (milliseconds)
 timeout = 10000
 # STUN server URL for NAT traversal
-stun_server = "stun:stun.l.google.com:19302"
+stun-server = "stun:stun.l.google.com:19302"
 # Data channels configuration
 data_channels = true
 # Codec: "vp8" or "h264"
@@ -48,36 +48,34 @@ cpu-used = 8 # CPU usage setting for VP8 (higher = faster, lower quality)
 [encoding]
 codec = "vp8"
 bitrate = 2000000
-keyframe_interval = 30
-cpu_used = 8
+keyframe-interval = 30
+cpu-used = 8
 
-[camera1]
+[camera-1]
 device = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"
 width = 640
 height = 480
 target-width = 640
 target-height = 480
 fps = 30
-webrtc_port = 5557
-flip_method = "vertical-flip"
+flip-method = "vertical-flip"
 
-[camera1.crop]
+[camera-1.crop]
 x = 0
 y = 0
 width = 640
 height = 480
 
-[camera2]
+[camera-2]
 device = "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10"
 width = 640
 height = 480
 target-width = 640
 target-height = 480
 fps = 30
-webrtc_port = 5558
-flip_method = "vertical-flip"
+flip-method = "vertical-flip"
 
-[camera2.crop]
+[camera-2.crop]
 x = 0
 y = 0
 width = 640
