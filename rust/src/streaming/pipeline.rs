@@ -18,20 +18,41 @@ pub struct CameraPipeline {
 impl CameraPipeline {
     /// Create a new camera pipeline
     pub fn new(camera_cfg: &CameraConfig, video_cfg: &VideoConfig) -> Result<Self> {
-        info!(
-            "Creating camera pipeline for device: {} ({}x{} @ {}fps)",
-            camera_cfg.device, camera_cfg.width, camera_cfg.height, camera_cfg.fps
-        );
+        Self::new_with_mode(camera_cfg, video_cfg, false)
+    }
+
+    /// Create a new camera pipeline with test mode option
+    pub fn new_with_mode(camera_cfg: &CameraConfig, video_cfg: &VideoConfig, test_mode: bool) -> Result<Self> {
+        if test_mode {
+            info!(
+                "Creating TEST camera pipeline ({}x{} @ {}fps)",
+                camera_cfg.width, camera_cfg.height, camera_cfg.fps
+            );
+        } else {
+            info!(
+                "Creating camera pipeline for device: {} ({}x{} @ {}fps)",
+                camera_cfg.device, camera_cfg.width, camera_cfg.height, camera_cfg.fps
+            );
+        }
 
         let pipeline = gst::Pipeline::builder()
             .name(&format!("camera_{}", camera_cfg.webrtc_port))
             .build();
 
-        // Camera source
-        let camera_src = gst::ElementFactory::make("libcamerasrc")
-            .property("camera-name", &camera_cfg.device)
-            .build()
-            .context("Failed to create libcamerasrc")?;
+        // Camera source - use videotestsrc in test mode
+        let camera_src = if test_mode {
+            info!("Using videotestsrc for testing (no camera hardware required)");
+            gst::ElementFactory::make("videotestsrc")
+                .property("pattern", 0) // SMPTE color bars
+                .property("is-live", true)
+                .build()
+                .context("Failed to create videotestsrc")?
+        } else {
+            gst::ElementFactory::make("libcamerasrc")
+                .property("camera-name", &camera_cfg.device)
+                .build()
+                .context("Failed to create libcamerasrc")?
+        };
 
         // Caps filter for camera output
         let caps = gst::Caps::builder("video/x-raw")

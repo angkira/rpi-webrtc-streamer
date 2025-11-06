@@ -52,3 +52,23 @@ rppal = { version = "0.18.0", optional = true }
 [features]
 default = []
 sensors = ["rppal"]
+test-mode = []
+
+[dev-dependencies]
+# Testing framework
+tokio-test = "0.4"
+serial_test = "3.0"
+tempfile = "3.8"
+rstest = "0.18"
+
+# HTTP client for testing
+reqwest = { version = "0.11", features = ["json"] }
+
+# Assertions
+assert_matches = "1.5"
+predicates = "3.0"
+
+[[test]]
+name = "integration"
+path = "tests/integration_test.rs"
+harness = true

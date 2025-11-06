@@ -28,6 +28,10 @@ struct Args {
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
+
+    /// Enable test mode (use videotestsrc instead of real cameras)
+    #[arg(short, long)]
+    test_mode: bool,
 }
 
 #[tokio::main]
@@ -68,7 +72,7 @@ async fn main() -> Result<()> {
     let config = Arc::new(config);
 
     // Start application
-    let app = Application::new(config)?;
+    let app = Application::new(config, args.test_mode)?;
     app.run().await?;
 
     Ok(())
@@ -77,11 +81,15 @@ async fn main() -> Result<()> {
 /// Main application structure
 struct Application {
     config: Arc<Config>,
+    test_mode: bool,
 }
 
 impl Application {
-    fn new(config: Arc<Config>) -> Result<Self> {
-        Ok(Application { config })
+    fn new(config: Arc<Config>, test_mode: bool) -> Result<Self> {
+        if test_mode {
+            info!("🧪 TEST MODE enabled - using videotestsrc instead of real cameras");
+        }
+        Ok(Application { config, test_mode })
     }
 
     async fn run(self) -> Result<()> {
@@ -94,8 +102,8 @@ impl Application {
         });
 
         // Start camera streamers
-        let camera1_handle = self.start_camera_streamer("camera1", &self.config.camera1);
-        let camera2_handle = self.start_camera_streamer("camera2", &self.config.camera2);
+        let camera1_handle = self.start_camera_streamer("camera1", &self.config.camera1, self.test_mode);
+        let camera2_handle = self.start_camera_streamer("camera2", &self.config.camera2, self.test_mode);
 
         // Wait for shutdown signal
         info!("Application started successfully. Press Ctrl+C to stop.");
@@ -122,13 +130,14 @@ impl Application {
         &self,
         name: &str,
         camera_cfg: &CameraConfig,
+        test_mode: bool,
     ) -> tokio::task::JoinHandle<()> {
         let config = self.config.clone();
         let camera_cfg = camera_cfg.clone();
         let name = name.to_string();
 
         tokio::spawn(async move {
-            if let Err(e) = run_camera_streamer(&name, &camera_cfg, &config).await {
+            if let Err(e) = run_camera_streamer(&name, &camera_cfg, &config, test_mode).await {
                 error!("Camera {} streamer error: {}", name, e);
             }
         })
@@ -140,6 +149,7 @@ async fn run_camera_streamer(
     name: &str,
     camera_cfg: &CameraConfig,
     config: &Config,
+    test_mode: bool,
 ) -> Result<()> {
     info!(
         "Starting {} streamer on port {} for device {}",
@@ -147,7 +157,7 @@ async fn run_camera_streamer(
     );
 
     // Create camera pipeline
-    let pipeline = CameraPipeline::new(camera_cfg, &config.video)
+    let pipeline = CameraPipeline::new_with_mode(camera_cfg, &config.video, test_mode)
         .context("Failed to create camera pipeline")?;
 
     info!("{} pipeline created successfully", name);

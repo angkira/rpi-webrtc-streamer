@@ -1,0 +1,14 @@
+{
+  "name": "webrtc-browser-tests",
+  "version": "1.0.0",
+  "description": "Headless browser tests for WebRTC streamer",
+  "type": "module",
+  "scripts": {
+    "test": "node test-webrtc.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "devDependencies": {}
+}

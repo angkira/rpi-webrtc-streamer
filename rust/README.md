@@ -122,7 +122,39 @@ cargo run --release -- --debug
 
 # Override PI IP
 cargo run --release -- --pi-ip 192.168.1.100
+
+# Test mode (no camera hardware required)
+cargo run --release -- --test-mode
 ```
+
+## Testing
+
+The project includes comprehensive testing infrastructure with mock video sources and headless browser integration tests.
+
+### Quick Test
+
+```bash
+# Run all tests
+./tests/run_all_tests.sh
+```
+
+### Test Categories
+
+1. **Unit Tests**: Component-level tests
+2. **Integration Tests**: Server and WebSocket tests
+3. **Browser Tests**: Real WebRTC connection tests with headless Chromium
+
+### Test Mode
+
+Run without physical cameras using GStreamer's videotestsrc:
+
+```bash
+cargo run -- --test-mode
+```
+
+This generates SMPTE color bar test patterns and allows full testing of WebRTC functionality without hardware.
+
+For detailed testing documentation, see [TESTING.md](TESTING.md).
 
 ## Usage
 
