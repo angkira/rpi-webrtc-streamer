@@ -1,0 +1,64 @@
+# RPi WebRTC Streamer Configuration
+
+[server]
+# Web server port for the viewer interface
+web-port = 8080
+
+# IP address to bind to (0.0.0.0 = all interfaces)
+bind-ip = "0.0.0.0"
+
+# Pi IP address (auto-detected if not specified)
+# pi-ip = "192.168.1.100"
+
+[camera1]
+# Camera device path for Camera 1
+device = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"
+
+# Resolution
+width = 640
+height = 480
+
+# Frame rate
+fps = 30
+
+# WebRTC signaling port for Camera 1
+webrtc-port = 5557
+
+# Video flip method (optional)
+# Options: none, clockwise, rotate-180, counterclockwise,
+#          horizontal-flip, vertical-flip, etc.
+flip-method = "vertical-flip"
+
+[camera2]
+# Camera device path for Camera 2
+device = "/base/axi/pcie@1000120000/rp1/i2c@80000/imx219@10"
+
+# Resolution
+width = 640
+height = 480
+
+# Frame rate
+fps = 30
+
+# WebRTC signaling port for Camera 2
+webrtc-port = 5558
+
+# Video flip method (optional)
+flip-method = "vertical-flip"
+
+[video]
+# Video codec: vp8 or h264
+codec = "vp8"
+
+# Target bitrate in bits per second (2 Mbps = 2000000)
+bitrate = 2000000
+
+# Keyframe interval (frames)
+keyframe-interval = 30
+
+[webrtc]
+# STUN server for NAT traversal
+stun-server = "stun://stun.l.google.com:19302"
+
+# Maximum number of concurrent clients per camera
+max-clients = 4
