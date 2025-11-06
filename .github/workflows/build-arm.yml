@@ -1,0 +1,177 @@
+name: Build ARM Binaries
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-arm64:
+    name: Build ARM64 (Raspberry Pi 4/5)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            pkg-config
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build ARM64 binary
+        run: |
+          cd rust
+          cross build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cd rust/target/${{ matrix.target }}/release
+          tar -czf rpi_webrtc_streamer-${{ matrix.target }}.tar.gz rpi_webrtc_streamer
+          mv rpi_webrtc_streamer-${{ matrix.target }}.tar.gz ../../../../
+
+      - name: Upload ARM64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpi_webrtc_streamer-${{ matrix.target }}
+          path: rpi_webrtc_streamer-${{ matrix.target }}.tar.gz
+
+  build-armv7:
+    name: Build ARMv7 (Raspberry Pi 3)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - armv7-unknown-linux-gnueabihf
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-armv7-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build ARMv7 binary
+        run: |
+          cd rust
+          cross build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cd rust/target/${{ matrix.target }}/release
+          tar -czf rpi_webrtc_streamer-${{ matrix.target }}.tar.gz rpi_webrtc_streamer
+          mv rpi_webrtc_streamer-${{ matrix.target }}.tar.gz ../../../../
+
+      - name: Upload ARMv7 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpi_webrtc_streamer-${{ matrix.target }}
+          path: rpi_webrtc_streamer-${{ matrix.target }}.tar.gz
+
+  create-release:
+    name: Create Release
+    needs: [build-arm64, build-armv7]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/*/*.tar.gz
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Raspberry Pi WebRTC Streamer Release
+
+            ### Installation
+
+            Download the appropriate binary for your Raspberry Pi:
+
+            - **Raspberry Pi 4/5 (64-bit)**: `rpi_webrtc_streamer-aarch64-unknown-linux-gnu.tar.gz`
+            - **Raspberry Pi 3 (32-bit)**: `rpi_webrtc_streamer-armv7-unknown-linux-gnueabihf.tar.gz`
+
+            ### Quick Start
+
+            ```bash
+            # Extract binary
+            tar -xzf rpi_webrtc_streamer-*.tar.gz
+
+            # Make executable
+            chmod +x rpi_webrtc_streamer
+
+            # Run in test mode (no camera required)
+            ./rpi_webrtc_streamer --test-mode
+
+            # Run with custom config
+            ./rpi_webrtc_streamer --config config.toml
+            ```
+
+            ### Documentation
+
+            - [README](https://github.com/${{ github.repository }}/blob/main/rust/README.md)
+            - [Testing Guide](https://github.com/${{ github.repository }}/blob/main/rust/TESTING.md)
+            - [Configuration Example](https://github.com/${{ github.repository }}/blob/main/rust/config.example.toml)
+
+            ### What's Changed
+
+            See the full changelog below.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

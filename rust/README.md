@@ -1,5 +1,8 @@
 # RPi WebRTC Streamer (Rust)
 
+[![Tests](https://github.com/angkira/rpi-webrtc-streamer/actions/workflows/rust-tests.yml/badge.svg)](https://github.com/angkira/rpi-webrtc-streamer/actions/workflows/rust-tests.yml)
+[![ARM Builds](https://github.com/angkira/rpi-webrtc-streamer/actions/workflows/build-arm.yml/badge.svg)](https://github.com/angkira/rpi-webrtc-streamer/actions/workflows/build-arm.yml)
+
 A high-performance, clean, and maintainable WebRTC streaming service for Raspberry Pi dual cameras, written in Rust.
 
 ## Features

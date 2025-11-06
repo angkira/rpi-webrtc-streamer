@@ -1,0 +1,98 @@
+name: Deployment Validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  pre-deploy-check:
+    name: Pre-Deployment Checks
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for test files
+        run: |
+          echo "Verifying test infrastructure..."
+
+          if [ ! -f "rust/tests/run_all_tests.sh" ]; then
+            echo "❌ Test runner missing!"
+            exit 1
+          fi
+
+          if [ ! -f "rust/tests/integration_test.rs" ]; then
+            echo "❌ Integration tests missing!"
+            exit 1
+          fi
+
+          if [ ! -f "rust/tests/browser/test-webrtc.js" ]; then
+            echo "❌ Browser tests missing!"
+            exit 1
+          fi
+
+          echo "✅ Test infrastructure present"
+
+      - name: Check documentation
+        run: |
+          echo "Verifying documentation..."
+
+          if [ ! -f "rust/README.md" ]; then
+            echo "❌ README missing!"
+            exit 1
+          fi
+
+          if [ ! -f "rust/TESTING.md" ]; then
+            echo "❌ Testing documentation missing!"
+            exit 1
+          fi
+
+          if [ ! -f "rust/config.example.toml" ]; then
+            echo "❌ Example config missing!"
+            exit 1
+          fi
+
+          echo "✅ Documentation complete"
+
+      - name: Check configuration
+        run: |
+          echo "Validating configuration..."
+
+          if [ ! -f "rust/Cargo.toml" ]; then
+            echo "❌ Cargo.toml missing!"
+            exit 1
+          fi
+
+          # Check for test dependencies
+          if ! grep -q "dev-dependencies" rust/Cargo.toml; then
+            echo "❌ Test dependencies not configured!"
+            exit 1
+          fi
+
+          echo "✅ Configuration valid"
+
+      - name: Deployment checklist
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📋 Pre-Deployment Checklist"
+          echo "=========================================="
+          echo ""
+          echo "✅ Test infrastructure present"
+          echo "✅ Documentation complete"
+          echo "✅ Configuration valid"
+          echo ""
+          echo "Before merging, ensure:"
+          echo "  • All tests pass"
+          echo "  • Code reviewed"
+          echo "  • Documentation updated"
+          echo "  • Config examples current"
+          echo ""
+
+  test-on-pr:
+    name: Run Full Test Suite
+    needs: pre-deploy-check
+    uses: ./.github/workflows/rust-tests.yml
