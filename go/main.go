@@ -15,6 +15,7 @@ import (
 
 	"pi-camera-streamer/camera"
 	"pi-camera-streamer/config"
+	"pi-camera-streamer/mjpeg"
 	"pi-camera-streamer/web"
 	"pi-camera-streamer/webrtc"
 	"go.uber.org/zap"
@@ -31,12 +32,13 @@ const (
 type Application struct {
 	config        *config.Config
 	logger        *zap.Logger
-	
+
 	// Components
 	cameraManager *camera.Manager
 	webrtcServers map[string]*webrtc.Server
+	mjpegManager  *mjpeg.Manager
 	webServer     *web.Server
-	
+
 	// Lifecycle
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -46,10 +48,11 @@ type Application struct {
 func main() {
 	// Parse command line flags
 	var (
-		configPath = flag.String("config", DefaultConfigPath, "Path to configuration file")
-		logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-		version    = flag.Bool("version", false, "Show version information")
-		help       = flag.Bool("help", false, "Show help information")
+		configPath    = flag.String("config", DefaultConfigPath, "Path to configuration file")
+		logLevel      = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		streamingMode = flag.String("mode", "webrtc", "Streaming mode: webrtc or mjpeg-rtp")
+		version       = flag.Bool("version", false, "Show version information")
+		help          = flag.Bool("help", false, "Show help information")
 	)
 	flag.Parse()
 
@@ -62,11 +65,19 @@ func main() {
 
 	if *help {
 		fmt.Printf("%s v%s\n\n", AppName, AppVersion)
-		fmt.Println("A high-performance WebRTC streaming service for Raspberry Pi dual cameras")
+		fmt.Println("A high-performance streaming service for Raspberry Pi dual cameras")
+		fmt.Println("\nSupports two streaming modes:")
+		fmt.Println("  - webrtc:    H.264/VP8 WebRTC streaming (default)")
+		fmt.Println("  - mjpeg-rtp: MJPEG over RTP/UDP (RFC 2435, low CPU)")
 		fmt.Println("\nUsage:")
 		flag.PrintDefaults()
 		fmt.Println("\nEnvironment Variables:")
 		fmt.Println("  PI_IP - Override auto-detected Pi IP address")
+		fmt.Println("\nExamples:")
+		fmt.Println("  # WebRTC mode (default)")
+		fmt.Println("  ./pi-camera-streamer -config config.toml -mode webrtc")
+		fmt.Println("\n  # MJPEG-RTP mode")
+		fmt.Println("  ./pi-camera-streamer -config config.toml -mode mjpeg-rtp")
 		os.Exit(0)
 	}
 
@@ -99,7 +110,20 @@ func main() {
 		zap.String("pi_ip", cfg.Server.PIIp),
 		zap.Int("web_port", cfg.Server.WebPort),
 		zap.Int("camera1_port", cfg.Camera1.WebRTCPort),
-		zap.Int("camera2_port", cfg.Camera2.WebRTCPort))
+		zap.Int("camera2_port", cfg.Camera2.WebRTCPort),
+		zap.String("streaming_mode", *streamingMode),
+		zap.Bool("mjpeg_rtp_enabled", cfg.MJPEGRTP.Enabled))
+
+	// Override MJPEG-RTP mode from CLI
+	if *streamingMode == "mjpeg-rtp" {
+		cfg.MJPEGRTP.Enabled = true
+		logger.Info("MJPEG-RTP mode enabled via CLI flag")
+	} else if *streamingMode == "webrtc" {
+		cfg.MJPEGRTP.Enabled = false
+		logger.Info("WebRTC mode enabled (MJPEG-RTP disabled)")
+	} else if *streamingMode != "webrtc" {
+		logger.Fatal("Invalid streaming mode", zap.String("mode", *streamingMode))
+	}
 
 	// Create application
 	app := NewApplication(cfg, logger)
@@ -140,7 +164,7 @@ func main() {
 // NewApplication creates a new application instance
 func NewApplication(cfg *config.Config, logger *zap.Logger) *Application {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &Application{
 		config:        cfg,
 		logger:        logger,
@@ -154,31 +178,78 @@ func NewApplication(cfg *config.Config, logger *zap.Logger) *Application {
 func (a *Application) Start(ctx context.Context) error {
 	a.logger.Info("Starting application components")
 
-	// Initialize camera manager
-	if err := a.initializeCameraManager(); err != nil {
-		return fmt.Errorf("failed to initialize camera manager: %w", err)
+	// Check which mode to run
+	if a.config.MJPEGRTP.Enabled {
+		// MJPEG-RTP mode
+		a.logger.Info("Starting in MJPEG-RTP mode")
+
+		// Initialize MJPEG manager
+		if err := a.initializeMJPEGManager(); err != nil {
+			return fmt.Errorf("failed to initialize MJPEG manager: %w", err)
+		}
+
+		// Start MJPEG streaming
+		if err := a.startMJPEGComponents(ctx); err != nil {
+			return fmt.Errorf("failed to start MJPEG components: %w", err)
+		}
+	} else {
+		// WebRTC mode (default)
+		a.logger.Info("Starting in WebRTC mode")
+
+		// Initialize camera manager
+		if err := a.initializeCameraManager(); err != nil {
+			return fmt.Errorf("failed to initialize camera manager: %w", err)
+		}
+
+		// Initialize WebRTC servers
+		if err := a.initializeWebRTCServers(); err != nil {
+			return fmt.Errorf("failed to initialize WebRTC servers: %w", err)
+		}
+
+		// Initialize web server
+		if err := a.initializeWebServer(); err != nil {
+			return fmt.Errorf("failed to initialize web server: %w", err)
+		}
+
+		// Start all components
+		if err := a.startComponents(); err != nil {
+			return fmt.Errorf("failed to start components: %w", err)
+		}
 	}
 
-	// Initialize WebRTC servers
-	if err := a.initializeWebRTCServers(); err != nil {
-		return fmt.Errorf("failed to initialize WebRTC servers: %w", err)
+	if a.config.MJPEGRTP.Enabled {
+		a.logger.Info("MJPEG-RTP streaming started successfully",
+			zap.String("camera1_dest", fmt.Sprintf("%s:%d", a.config.MJPEGRTP.Camera1.DestHost, a.config.MJPEGRTP.Camera1.DestPort)),
+			zap.String("camera2_dest", fmt.Sprintf("%s:%d", a.config.MJPEGRTP.Camera2.DestHost, a.config.MJPEGRTP.Camera2.DestPort)))
+	} else {
+		a.logger.Info("Application started successfully",
+			zap.String("web_url", fmt.Sprintf("http://%s:%d", a.config.Server.PIIp, a.config.Server.WebPort)),
+			zap.String("webrtc_cam1", fmt.Sprintf("ws://%s:%d/ws", a.config.Server.PIIp, a.config.Camera1.WebRTCPort)),
+			zap.String("webrtc_cam2", fmt.Sprintf("ws://%s:%d/ws", a.config.Server.PIIp, a.config.Camera2.WebRTCPort)))
 	}
 
-	// Initialize web server
-	if err := a.initializeWebServer(); err != nil {
-		return fmt.Errorf("failed to initialize web server: %w", err)
+	return nil
+}
+
+// initializeMJPEGManager sets up the MJPEG-RTP manager
+func (a *Application) initializeMJPEGManager() error {
+	a.logger.Info("Initializing MJPEG-RTP manager")
+
+	a.mjpegManager = mjpeg.NewManager(a.config, a.logger)
+
+	a.logger.Info("MJPEG-RTP manager initialized")
+	return nil
+}
+
+// startMJPEGComponents starts MJPEG-RTP streaming
+func (a *Application) startMJPEGComponents(ctx context.Context) error {
+	a.logger.Info("Starting MJPEG-RTP components")
+
+	if err := a.mjpegManager.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start MJPEG manager: %w", err)
 	}
 
-	// Start all components
-	if err := a.startComponents(); err != nil {
-		return fmt.Errorf("failed to start components: %w", err)
-	}
-
-	a.logger.Info("Application started successfully",
-		zap.String("web_url", fmt.Sprintf("http://%s:%d", a.config.Server.PIIp, a.config.Server.WebPort)),
-		zap.String("webrtc_cam1", fmt.Sprintf("ws://%s:%d/ws", a.config.Server.PIIp, a.config.Camera1.WebRTCPort)),
-		zap.String("webrtc_cam2", fmt.Sprintf("ws://%s:%d/ws", a.config.Server.PIIp, a.config.Camera2.WebRTCPort)))
-
+	a.logger.Info("MJPEG-RTP components started")
 	return nil
 }
 
@@ -277,7 +348,7 @@ func (a *Application) startCamerasAsync() {
 	time.Sleep(time.Duration(a.config.Timeouts.WebRTCStartupDelay) * time.Millisecond)
 
 	a.logger.Info("Starting cameras")
-	
+
 	for _, cameraID := range []string{"camera1", "camera2"} {
 		if err := a.cameraManager.StartCamera(cameraID); err != nil {
 			a.logger.Error("Failed to start camera", zap.String("camera", cameraID), zap.Error(err))
@@ -295,6 +366,13 @@ func (a *Application) Stop(ctx context.Context) error {
 
 	// Cancel context
 	a.cancel()
+
+	// Stop MJPEG manager if running
+	if a.mjpegManager != nil {
+		if err := a.mjpegManager.Stop(); err != nil {
+			a.logger.Error("Error stopping MJPEG manager", zap.Error(err))
+		}
+	}
 
 	// Stop web server
 	if a.webServer != nil {
@@ -393,4 +471,4 @@ func createLogger(level string) (*zap.Logger, error) {
 	}
 
 	return config.Build()
-} 
+}

@@ -53,7 +53,7 @@ cpu_used = 4
 
 [camera1]
 device = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"
-# Use FullHD resolution for camera1 
+# Use FullHD resolution for camera1
 width = 1920
 height = 1080
 target-width = 960
@@ -132,4 +132,30 @@ max_payload_size_mb = 3             # Increased for FullHD frames but with limit
 enable_memory_monitoring = true
 memory_check_interval_seconds = 30  # More frequent memory checks for FullHD
 max_memory_usage_mb = 384           # Match the limits setting
-gst_debug_level = 1                 # Further reduced to minimize memory overhead for FullHD 
+gst_debug_level = 1                 # Further reduced to minimize memory overhead for FullHD
+
+# MJPEG-RTP streaming configuration (alternative to WebRTC)
+# Low CPU usage, independent JPEG frames, RTP/UDP transport (RFC 2435)
+[mjpeg-rtp]
+enabled = false                     # Set to true or use -mode mjpeg-rtp to enable
+mtu = 1400                          # MTU for RTP packets (typical Ethernet: 1400-1500)
+dscp = 0                            # DSCP QoS marking (0 = best effort, 46 = EF for low latency)
+stats_interval_seconds = 10         # Statistics logging interval
+
+# Camera 1 MJPEG-RTP settings
+[mjpeg-rtp.camera1]
+enabled = true                      # Enable MJPEG-RTP for camera 1
+dest_host = "192.168.1.100"         # Destination IP for RTP stream
+dest_port = 5000                    # Destination UDP port for camera 1
+local_port = 0                      # Local port (0 = auto-assign)
+quality = 85                        # JPEG quality (1-100, higher = better quality)
+ssrc = 0x12345678                   # RTP SSRC identifier (unique per stream)
+
+# Camera 2 MJPEG-RTP settings
+[mjpeg-rtp.camera2]
+enabled = true                      # Enable MJPEG-RTP for camera 2
+dest_host = "192.168.1.100"         # Destination IP for RTP stream
+dest_port = 5002                    # Destination UDP port for camera 2
+local_port = 0                      # Local port (0 = auto-assign)
+quality = 85                        # JPEG quality (1-100)
+ssrc = 0x12345679                   # RTP SSRC identifier (different from camera1)

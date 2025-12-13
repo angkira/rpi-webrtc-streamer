@@ -17,6 +17,7 @@ type Config struct {
 	Encoding EncodingConfig `toml:"encoding" json:"encoding"`
 	Video    VideoConfig   `toml:"video" json:"video"`
 	WebRTC   WebRTCConfig  `toml:"webrtc" json:"webrtc"`
+	MJPEGRTP MJPEGRTPConfig `toml:"mjpeg-rtp" json:"mjpeg_rtp"`
 	Buffers  BufferConfig  `toml:"buffers" json:"buffers"`
 	Timeouts TimeoutConfig `toml:"timeouts" json:"timeouts"`
 	Logging  LoggingConfig `toml:"logging" json:"logging"`
@@ -76,6 +77,26 @@ type WebRTCConfig struct {
 	MTU          int    `toml:"mtu" json:"mtu"`
 	Latency      int    `toml:"latency" json:"latency"`
 	Timeout      int    `toml:"timeout" json:"timeout"`
+}
+
+// MJPEGRTPConfig holds MJPEG-RTP streaming settings
+type MJPEGRTPConfig struct {
+	Enabled       bool                   `toml:"enabled" json:"enabled"`
+	Camera1       MJPEGRTPCameraConfig   `toml:"camera1" json:"camera1"`
+	Camera2       MJPEGRTPCameraConfig   `toml:"camera2" json:"camera2"`
+	MTU           int                    `toml:"mtu" json:"mtu"`
+	DSCP          int                    `toml:"dscp" json:"dscp"`
+	StatsInterval int                    `toml:"stats_interval_seconds" json:"stats_interval_seconds"`
+}
+
+// MJPEGRTPCameraConfig holds per-camera MJPEG-RTP settings
+type MJPEGRTPCameraConfig struct {
+	Enabled   bool   `toml:"enabled" json:"enabled"`
+	DestHost  string `toml:"dest_host" json:"dest_host"`
+	DestPort  int    `toml:"dest_port" json:"dest_port"`
+	LocalPort int    `toml:"local_port" json:"local_port"` // Optional
+	Quality   int    `toml:"quality" json:"quality"`       // JPEG quality 1-100
+	SSRC      uint32 `toml:"ssrc" json:"ssrc"`             // RTP SSRC identifier
 }
 
 // BufferConfig holds buffer size settings for channels
@@ -166,6 +187,28 @@ func LoadConfig(configPath string) (*Config, error) {
 			Latency:    200,
 			Timeout:    10000,
 		},
+		MJPEGRTP: MJPEGRTPConfig{
+			Enabled: false, // Disabled by default, enable via config or CLI
+			Camera1: MJPEGRTPCameraConfig{
+				Enabled:   false,
+				DestHost:  "127.0.0.1",
+				DestPort:  5000,
+				LocalPort: 0, // Auto-assign
+				Quality:   85,
+				SSRC:      0x12345678,
+			},
+			Camera2: MJPEGRTPCameraConfig{
+				Enabled:   false,
+				DestHost:  "127.0.0.1",
+				DestPort:  5002,
+				LocalPort: 0, // Auto-assign
+				Quality:   85,
+				SSRC:      0x12345679,
+			},
+			MTU:           1400,
+			DSCP:          0, // No QoS marking by default
+			StatsInterval: 10,
+		},
 		Video: VideoConfig{
 			Codec:           "h264",
 			EncoderPreset:   "ultrafast",
@@ -203,7 +246,7 @@ func LoadConfig(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to decode config file: %w", err)
 		}
 		logger.Info("Config loaded from file", zap.String("path", configPath))
-		logger.Info("Camera flip methods", 
+		logger.Info("Camera flip methods",
 			zap.String("camera1_flip", config.Camera1.FlipMethod),
 			zap.String("camera2_flip", config.Camera2.FlipMethod))
 	} else {
@@ -251,4 +294,4 @@ func SaveConfig(config *Config, configPath string) error {
 	}
 
 	return nil
-} 
+}
