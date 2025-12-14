@@ -1,0 +1,10 @@
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/aarch64-apple-darwin/release/deps/walkdir-b97321120653bc01.d: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/lib.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/dent.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/error.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/util.rs
+
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/aarch64-apple-darwin/release/deps/libwalkdir-b97321120653bc01.rlib: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/lib.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/dent.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/error.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/util.rs
+
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/aarch64-apple-darwin/release/deps/libwalkdir-b97321120653bc01.rmeta: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/lib.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/dent.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/error.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/util.rs
+
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/lib.rs:
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/dent.rs:
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/error.rs:
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/walkdir-2.5.0/src/util.rs:

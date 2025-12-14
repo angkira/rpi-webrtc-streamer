@@ -1,0 +1,8 @@
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/debug/build/target-lexicon-421cd1606788ae8a/build_script_build-421cd1606788ae8a.d: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/build.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/data_model.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/triple.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/targets.rs
+
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/debug/build/target-lexicon-421cd1606788ae8a/build_script_build-421cd1606788ae8a: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/build.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/data_model.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/triple.rs /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/targets.rs
+
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/build.rs:
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/data_model.rs:
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/triple.rs:
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/target-lexicon-0.13.3/src/targets.rs:

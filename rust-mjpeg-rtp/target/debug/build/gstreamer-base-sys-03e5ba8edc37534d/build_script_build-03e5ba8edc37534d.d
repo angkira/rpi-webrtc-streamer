@@ -1,0 +1,5 @@
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/debug/build/gstreamer-base-sys-03e5ba8edc37534d/build_script_build-03e5ba8edc37534d.d: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gstreamer-base-sys-0.23.6/build.rs
+
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/debug/build/gstreamer-base-sys-03e5ba8edc37534d/build_script_build-03e5ba8edc37534d: /Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gstreamer-base-sys-0.23.6/build.rs
+
+/Users/iuriimedvedev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gstreamer-base-sys-0.23.6/build.rs:

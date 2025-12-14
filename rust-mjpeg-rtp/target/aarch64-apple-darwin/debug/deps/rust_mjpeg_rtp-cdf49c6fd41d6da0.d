@@ -1,0 +1,15 @@
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/aarch64-apple-darwin/debug/deps/rust_mjpeg_rtp-cdf49c6fd41d6da0.d: src/lib.rs src/capture/mod.rs src/capture/platform.rs src/config.rs src/rtp/mod.rs src/rtp/jpeg.rs src/rtp/packet.rs src/streamer/mod.rs src/streamer/stats.rs
+
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/aarch64-apple-darwin/debug/deps/librust_mjpeg_rtp-cdf49c6fd41d6da0.rlib: src/lib.rs src/capture/mod.rs src/capture/platform.rs src/config.rs src/rtp/mod.rs src/rtp/jpeg.rs src/rtp/packet.rs src/streamer/mod.rs src/streamer/stats.rs
+
+/Users/iuriimedvedev/Project/rpi-webrtc-streamer/rust-mjpeg-rtp/target/aarch64-apple-darwin/debug/deps/librust_mjpeg_rtp-cdf49c6fd41d6da0.rmeta: src/lib.rs src/capture/mod.rs src/capture/platform.rs src/config.rs src/rtp/mod.rs src/rtp/jpeg.rs src/rtp/packet.rs src/streamer/mod.rs src/streamer/stats.rs
+
+src/lib.rs:
+src/capture/mod.rs:
+src/capture/platform.rs:
+src/config.rs:
+src/rtp/mod.rs:
+src/rtp/jpeg.rs:
+src/rtp/packet.rs:
+src/streamer/mod.rs:
+src/streamer/stats.rs:
