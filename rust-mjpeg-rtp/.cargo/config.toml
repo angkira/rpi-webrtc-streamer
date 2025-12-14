@@ -1,0 +1,6 @@
+# Local cargo config for rust-mjpeg-rtp
+# This overrides the parent .cargo/config.toml to allow native macOS builds
+
+[build]
+# Use native target for development on macOS
+# For cross-compilation to Raspberry Pi, use: cargo build --target aarch64-unknown-linux-gnu

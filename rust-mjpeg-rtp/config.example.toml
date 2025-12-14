@@ -1,0 +1,74 @@
+# MJPEG-RTP Streaming Configuration Example
+# This configuration file demonstrates all available options for the Rust MJPEG-RTP streamer
+
+[mjpeg-rtp]
+# Enable MJPEG-RTP streaming mode
+enabled = true
+
+# Maximum Transmission Unit (bytes) - adjust based on your network
+# Default: 1400 (safe for most networks)
+# Range: 500-9000
+mtu = 1400
+
+# DSCP (Differentiated Services Code Point) for QoS marking
+# Default: 0 (no QoS)
+# Range: 0-63
+# Common values:
+#   - 0: Best Effort (default)
+#   - 46: Expedited Forwarding (EF) - for low-latency video
+#   - 34: Assured Forwarding (AF41) - for high-priority video
+dscp = 0
+
+# Statistics reporting interval (seconds)
+stats_interval_seconds = 10
+
+# Camera 1 Configuration
+[mjpeg-rtp.camera1]
+enabled = true
+
+# Camera device path
+# - macOS: "0" for first webcam, "1" for second, etc.
+# - Raspberry Pi: "/base/axi/pcie@1000120000/rp1/i2c@88000/imx219@10"
+device = "0"
+
+# Video resolution (must be multiples of 8)
+width = 1920
+height = 1080
+
+# Frames per second (1-120)
+fps = 30
+
+# JPEG quality (1-100)
+# Higher = better quality but larger frames
+# 85-95 recommended for streaming
+quality = 95
+
+# Optional flip/rotation
+# Options: "vertical-flip", "horizontal-flip", "rotate-180", "rotate-90", "rotate-270"
+# flip_method = "vertical-flip"
+
+# RTP destination
+dest_host = "192.168.1.100"
+dest_port = 5000
+
+# Local UDP port (0 = auto-assign)
+local_port = 0
+
+# RTP SSRC (Synchronization Source) identifier
+# Must be unique per stream
+ssrc = 0xDEADBEEF
+
+# Camera 2 Configuration
+[mjpeg-rtp.camera2]
+enabled = false
+
+device = "1"
+width = 640
+height = 480
+fps = 30
+quality = 85
+
+dest_host = "192.168.1.100"
+dest_port = 5002
+local_port = 0
+ssrc = 0xCAFEBABE
