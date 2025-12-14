@@ -1,0 +1,29 @@
+# Test configuration for integration tests
+
+[server]
+web-port = 18080
+bind-ip = "127.0.0.1"
+pi-ip = "127.0.0.1"
+
+[camera1]
+device = "test_camera_1"
+width = 640
+height = 480
+fps = 30
+webrtc-port = 15557
+
+[camera2]
+device = "test_camera_2"
+width = 640
+height = 480
+fps = 30
+webrtc-port = 15558
+
+[video]
+codec = "vp8"
+bitrate = 1000000
+keyframe-interval = 30
+
+[webrtc]
+stun-server = "stun://stun.l.google.com:19302"
+max-clients = 4

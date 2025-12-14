@@ -1,0 +1,181 @@
+name: Rust Tests
+
+on:
+  push:
+    branches: [ main, master, "claude/*" ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-tools \
+            libglib2.0-dev
+
+      - name: Verify GStreamer
+        run: |
+          gst-inspect-1.0 --version
+          gst-inspect-1.0 videotestsrc || echo "videotestsrc not found"
+          gst-inspect-1.0 vp8enc || echo "vp8enc not found"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cd rust && cargo fmt -- --check
+        continue-on-error: true
+
+      - name: Run clippy
+        run: cd rust && cargo clippy -- -D warnings
+        continue-on-error: true
+
+      - name: Build
+        run: cd rust && cargo build --verbose
+
+      - name: Run unit tests
+        run: cd rust && cargo test --lib --verbose
+
+      - name: Run integration tests
+        run: cd rust && cargo test --test integration --verbose
+        timeout-minutes: 5
+
+  browser-test:
+    name: Browser WebRTC Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-tools \
+            libglib2.0-dev
+
+      - name: Install Playwright dependencies
+        run: |
+          sudo apt-get install -y \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+            libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+            libpango-1.0-0 libcairo2 libasound2t64
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Build streamer
+        run: cd rust && cargo build --verbose
+
+      - name: Install browser test dependencies
+        run: |
+          cd rust/tests/browser
+          npm ci
+          npx playwright install chromium
+
+      - name: Run browser tests
+        run: |
+          cd rust/tests/browser
+          npm test
+        timeout-minutes: 5
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            rust/logs/
+            rust/*.log
+
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    needs: [test, browser-test]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Build release
+        run: cd rust && cargo build --release --verbose
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpi_webrtc_streamer-x86_64
+          path: rust/target/release/rpi_webrtc_streamer
