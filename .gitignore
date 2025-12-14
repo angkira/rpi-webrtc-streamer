@@ -1,6 +1,8 @@
-/target
+target/
 .go
 test_output/
 *.mp4
 *.h264
 *.h265
+profiles/
+rust-mjpeg-rtp/Cargo.lock
