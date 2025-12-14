@@ -6,3 +6,7 @@ test_output/
 *.h265
 profiles/
 rust-mjpeg-rtp/Cargo.lock
+*-arm64
+*-amd64
+pi-camera-streamer-*
+mjpeg-rtp
